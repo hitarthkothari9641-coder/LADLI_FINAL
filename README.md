@@ -55,10 +55,21 @@ presigned URLs.
 Development:
 
 ```bash
+./run.sh                 # macOS/Linux one-click launcher (dev server :5000)
+./run.sh prod            # same, but serves via Gunicorn on :8000
+run.bat                  # Windows one-click launcher (dev server :5000)
+```
+
+Or manually:
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python3 app.py          # http://127.0.0.1:5000
 ```
+
+> `run.sh` / `run.bat` are development conveniences only — exclude them
+> from the production package (production's entry point is Gunicorn).
 
 Production:
 
