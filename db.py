@@ -1,9 +1,17 @@
 """
 db.py — PostgreSQL data-access layer for the LADLI backend.
 
-Supports PostgreSQL via psycopg2 (with connection pooling, dictionary cursors,
-and automatic schema initialization) with automatic environment detection
-from DATABASE_URL or individual PG* settings.
+Supports PostgreSQL through either driver (with connection pooling,
+dictionary cursors, and automatic schema initialization), auto-detected
+at import time:
+
+  - psycopg2 (psycopg2-binary) — preferred when installed
+  - psycopg  (psycopg 3, `pip install "psycopg[binary]"`) — used as a
+    fallback; required on newer Python versions (3.13+) where
+    psycopg2-binary may not ship prebuilt wheels yet.
+
+Connection settings come from DATABASE_URL or the individual PG*
+environment variables.
 """
 
 import os
@@ -20,9 +28,17 @@ try:
     import psycopg2
     from psycopg2 import pool
     from psycopg2.extras import RealDictCursor
-    PSYCOPG2_AVAILABLE = True
+    PG_DRIVER = "psycopg2"
 except ImportError:
-    PSYCOPG2_AVAILABLE = False
+    try:
+        import psycopg  # psycopg 3
+        from psycopg.rows import dict_row
+        PG_DRIVER = "psycopg3"
+    except ImportError:
+        PG_DRIVER = None
+
+# Kept for backwards compatibility with existing checks.
+PSYCOPG2_AVAILABLE = PG_DRIVER is not None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -70,7 +86,10 @@ def get_pg_connection_params():
 
 def _get_pg_pool():
     global _pg_pool
-    if _pg_pool is None and PSYCOPG2_AVAILABLE and is_postgres_configured():
+    # Connection pooling is only used with psycopg2; with psycopg 3 the app
+    # opens short-lived direct connections instead (identical behaviour,
+    # no extra psycopg_pool dependency needed).
+    if _pg_pool is None and PG_DRIVER == "psycopg2" and is_postgres_configured():
         params = get_pg_connection_params()
         _pg_pool = pool.SimpleConnectionPool(1, 20, **params)
     return _pg_pool
@@ -128,7 +147,10 @@ class PostgresConnectionWrapper:
         self._closed = False
 
     def execute(self, sql, params=None):
-        cursor = self._conn.cursor(cursor_factory=RealDictCursor)
+        if PG_DRIVER == "psycopg2":
+            cursor = self._conn.cursor(cursor_factory=RealDictCursor)
+        else:  # psycopg 3
+            cursor = self._conn.cursor(row_factory=dict_row)
         wrapper = PostgresCursorWrapper(cursor, self)
         wrapper.execute(sql, params)
         return wrapper
@@ -167,21 +189,29 @@ class PostgresConnectionWrapper:
 def get_db():
     """
     Returns an active database connection wrapper.
-    Connects to PostgreSQL.
+    Connects to PostgreSQL with whichever driver is installed
+    (psycopg2 preferred, psycopg 3 as fallback).
     """
-    if PSYCOPG2_AVAILABLE and is_postgres_configured():
+    if PG_DRIVER and is_postgres_configured():
         try:
             pool_instance = _get_pg_pool()
             if pool_instance:
                 conn = pool_instance.getconn()
                 return PostgresConnectionWrapper(conn, from_pool=True)
             params = get_pg_connection_params()
-            conn = psycopg2.connect(**params)
+            if PG_DRIVER == "psycopg2":
+                conn = psycopg2.connect(**params)
+            else:  # psycopg 3
+                conn = psycopg.connect(**params)
             return PostgresConnectionWrapper(conn, from_pool=False)
         except Exception as e:
             raise RuntimeError(f"Could not connect to PostgreSQL database: {e}")
 
-    raise RuntimeError("No supported database driver (psycopg2) is available or not configured.")
+    raise RuntimeError(
+        "No PostgreSQL driver is available or the database is not configured. "
+        "Install 'psycopg2-binary' (or 'psycopg[binary]' on Python 3.13+) and "
+        "set DATABASE_URL or PGHOST/PGDATABASE/PGUSER."
+    )
 
 # ---------------------------------------------------------------------------
 # Database Schema Definitions

@@ -25,8 +25,12 @@ Flask + Gunicorn + PostgreSQL (AWS RDS) + AWS S3 + AWS Secrets Manager + HTTPS
 - Optional: an AWS S3 bucket for quote attachments (falls back to local
   `attachments/` storage when unconfigured, e.g. during development)
 
-Dependencies (`requirements.txt`): Flask, Werkzeug, psycopg2-binary,
-boto3, gunicorn.
+Dependencies (`requirements.txt`): Flask, Werkzeug, boto3, gunicorn and
+a PostgreSQL driver — `psycopg2-binary` on Python ≤ 3.12, or the modern
+`psycopg[binary]` (psycopg 3) on Python 3.13+ where psycopg2 wheels may
+not exist (e.g. new Python on Windows). `db.py` auto-detects whichever
+driver is installed; pip picks the right one automatically via the
+markers in `requirements.txt`.
 
 ## 2. Configuration
 
