@@ -159,15 +159,16 @@
   }
 
   // --- Visitor Management: render the running visitor count ----------------
-  // The badge shows a running total that goes up by one every time the site
-  // is opened in a NEW browser tab — but not on a refresh or reload of a tab
-  // that's already been counted. Each tab gets one random id
-  // (crypto.randomUUID()) stored in sessionStorage ("ladli_visitor_id"),
-  // which is scoped to that single tab: a refresh or in-tab navigation keeps
-  // the same id (so it's not recounted), but a new tab always starts with
-  // empty sessionStorage, so it's always treated as a new visit and
-  // increments the total. Closing a tab does not decrement anything — this
-  // is a running total, not a "currently open tabs" live count.
+  // Semantics: the badge shows the total number of UNIQUE VISITORS —
+  // distinct browsers/devices — not sessions, tabs, or page views.
+  // Identification is persistent: each browser gets one random id
+  // (crypto.randomUUID()) stored in localStorage ("ladli_visitor_id"),
+  // and the server additionally pins the very same id in an HttpOnly
+  // cookie. On every page load the id is reported to the backend, which
+  // increments the lifetime total only the FIRST time it ever sees that
+  // id — refreshes, new tabs and return visits from the same browser are
+  // never recounted. The server prefers its own cookie over anything the
+  // page posts, so the counter cannot be inflated from client-side code.
   (function initVisitorBadge() {
     const STORAGE_KEY = 'ladli_visitor_id';
     const CACHE_KEY = 'ladli_visitor_count_cache';
@@ -258,50 +259,43 @@
     } catch (e) { /* non-critical */ }
 
     let visitorId = null;
-    let isNewVisitor = false;
     try {
-      // sessionStorage (not localStorage) is deliberate here: it is scoped
-      // to this ONE tab only. A refresh or in-tab navigation keeps the same
-      // value (so it does not recount), but every new tab — even to the
-      // same site, even in the same window — starts with empty
-      // sessionStorage and so is always treated as a new visit.
-      visitorId = sessionStorage.getItem(STORAGE_KEY);
+      // localStorage (not sessionStorage) is deliberate: the id must be
+      // PERSISTENT so the same browser is recognized across tabs, page
+      // views, restarts and return visits, and is only ever counted once.
+      visitorId = localStorage.getItem(STORAGE_KEY);
       if (!visitorId) {
         visitorId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
           : 'visitor-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-        sessionStorage.setItem(STORAGE_KEY, visitorId);
-        isNewVisitor = true;
+        localStorage.setItem(STORAGE_KEY, visitorId);
       }
     } catch (e) {
-      // No sessionStorage available at all — fall back to a per-page-load id.
-      // This tab just won't be recognized as returning next time, but
-      // the badge still renders a real total.
-      visitorId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
-        : 'visitor-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-      isNewVisitor = true;
+      // No localStorage available (private mode, blocked storage). Send an
+      // empty id — the backend then identifies this browser purely via its
+      // HttpOnly cookie (or mints a fresh id server-side on first contact).
+      visitorId = '';
     }
 
-    if (isNewVisitor) {
-      // Brand-new tab: record it. The backend only increments
-      // the lifetime total the first time it ever sees this id, so even if
-      // this fires more than once for any reason, the count stays correct.
-      fetch('/api/visitor-register', {
-        method: 'POST',
-        cache: 'no-store',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visitor_id: visitorId }),
-      })
-        .then(res => (res.ok ? res.json() : null))
-        .then(data => { if (data && data.ok) renderCount(data.count); })
-        .catch(() => { /* non-critical */ });
-    } else {
-      // Already-known device: never re-report it as a visit, just fetch
-      // and display the current lifetime total.
-      fetch('/api/visitor-count', { cache: 'no-store', credentials: 'same-origin' })
-        .then(res => (res.ok ? res.json() : null))
-        .then(data => { if (data) renderCount(data.count); })
-        .catch(() => { /* non-critical */ });
-    }
+    // Report this page load. The backend deduplicates: it only increments
+    // the lifetime total the first time it ever sees this browser (by
+    // HttpOnly cookie first, then the posted id), so refreshes, extra tabs
+    // and repeat visits never inflate the count.
+    fetch('/api/visitor-register', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visitor_id: visitorId }),
+    })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data && data.ok) renderCount(data.count); })
+      .catch(() => {
+        // Registration failed (offline, rate-limited…) — still try to show
+        // the current total so the badge renders a real number.
+        fetch('/api/visitor-count', { cache: 'no-store', credentials: 'same-origin' })
+          .then(res => (res.ok ? res.json() : null))
+          .then(data => { if (data) renderCount(data.count); })
+          .catch(() => { /* non-critical */ });
+      });
   })();
 })();

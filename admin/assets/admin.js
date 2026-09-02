@@ -111,18 +111,22 @@ const Admin = (() => {
     const sidebar = document.querySelector('.sidebar');
     const backdrop = document.querySelector('.sidebar-backdrop');
     if (toggle && sidebar) {
+        if (!sidebar.id) sidebar.id = 'admin-sidebar';
+        const setState = (open) => {
+            sidebar.classList.toggle('is-open', open);
+            if (backdrop) backdrop.classList.toggle('is-visible', open);
+            document.body.classList.toggle('sidebar-open', open);
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        };
         toggle.addEventListener('click', () => {
-            sidebar.classList.toggle('is-open');
-            if (backdrop) backdrop.classList.toggle('is-visible');
-            document.body.classList.toggle('sidebar-open');
+            setState(!sidebar.classList.contains('is-open'));
         });
         if (backdrop) {
-            backdrop.addEventListener('click', () => {
-                sidebar.classList.remove('is-open');
-                backdrop.classList.remove('is-visible');
-                document.body.classList.remove('sidebar-open');
-            });
+            backdrop.addEventListener('click', () => setState(false));
         }
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && sidebar.classList.contains('is-open')) setState(false);
+        });
     }
   }
 

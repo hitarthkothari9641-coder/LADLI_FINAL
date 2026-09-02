@@ -8,11 +8,11 @@ elsewhere on the site so it can be updated manually without touching code.
 
 | File | Instrument | Card on `equipment.html` | Also used on |
 |---|---|---|---|
-| `dga-gas-chromatograph.jpg` / `.webp` | Gas Chromatograph — Dissolved Gas Analysis (DGA) | DGA by GC-TCD/FID | `dga.html` |
-| `oil-bdv-tester.jpg` / `.webp` | Automatic Oil Breakdown Voltage (BDV) Tester | Oil Breakdown Voltage Tester | `test-bdv.html` |
-| `karl-fischer-titrator-moisture.jpg` / `.webp` | Coulometric KF Titrator / Micro Moisture Meter | Karl Fischer Titrator | `test-moisture.html` |
-| `automatic-titrator-acidity.jpg` / `.webp` | Automatic Potentiometric Titrator (Acidity / Neutralisation Value) | Automatic Titrator | `test-acidity.html` |
-| `flash-fire-point-apparatus.jpg` / `.webp` | Pensky-Martens Flash Point Apparatus | *(currently not shown — see note)* | `test-flash-point.html` |
+| `dga-gas-chromatograph.webp` | Gas Chromatograph — Dissolved Gas Analysis (DGA) | DGA by GC-TCD/FID | `dga.html` |
+| `oil-bdv-tester.webp` | Automatic Oil Breakdown Voltage (BDV) Tester | Oil Breakdown Voltage Tester | `test-bdv.html` |
+| `karl-fischer-titrator-moisture.webp` | Coulometric KF Titrator / Micro Moisture Meter | Karl Fischer Titrator | `test-moisture.html` |
+| `automatic-titrator-acidity.webp` | Automatic Potentiometric Titrator (Acidity / Neutralisation Value) | Automatic Titrator | `test-acidity.html` |
+| `flash-fire-point-apparatus.webp` | Pensky-Martens Flash Point Apparatus | *(currently not shown — see note)* | `test-flash-point.html` |
 
 ## No-photo cards (photo removed at your request)
 
@@ -29,14 +29,15 @@ graphic, nothing:
 
 ## How to add a photo to one of these cards
 
-1. Save your photo into this folder, e.g. `tan-delta-power-factor-meter.jpg`
-   (recommended: JPG, ~1200px on the longest side, quality ~80–90%).
+1. Save your photo into this folder, e.g. `tan-delta-power-factor-meter.webp`
+   (recommended: WebP, ~1200px on the longest side, quality ~80–90%; the site
+   now ships WebP only — original JPG masters are kept outside the repo).
 2. In `site/equipment.html`, find that card's `<article class="card">` block and
    add an `<img>` line back in, following the pattern used by the cards that
    already have photos, e.g.:
    ```html
    <article class="card" style="padding: 0; overflow: hidden">
-     <img src="assets/images/equipment/tan-delta-power-factor-meter.jpg"
+     <img src="assets/images/equipment/tan-delta-power-factor-meter.webp"
           alt="Tan Delta / Power Factor Meter"
           style="width: 100%; height: 210px; object-fit: contain; background: var(--sky-12); padding: 10px" />
      <div style="padding: 24px">
@@ -47,11 +48,11 @@ graphic, nothing:
 ## Note on Flash and Fire Point Apparatus
 
 A real, correctly-matched photo of your Pensky-Martens apparatus already exists
-here as `flash-fire-point-apparatus.jpg` / `.webp` (it's used on
+here as `flash-fire-point-apparatus.webp` (it's used on
 `test-flash-point.html`). It was **not** deleted — it's simply not referenced by
 the equipment.html card right now, per your request to remove that card's photo.
 To bring it back, add the `<img>` back per the instructions above pointing at
-`flash-fire-point-apparatus.jpg`.
+`flash-fire-point-apparatus.webp`.
 
 ## Still using older generic placeholder imagery (unchanged)
 

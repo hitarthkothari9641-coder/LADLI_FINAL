@@ -7,6 +7,7 @@ import json
 import uuid
 import datetime
 import functools
+import hashlib
 import re
 import secrets as _secrets
 import time
@@ -202,26 +203,44 @@ def _verify_csrf():
     if not token or token != session.get("csrf_token"):
         abort(403)
 
+def _password_fingerprint(password_hash):
+    """Short fingerprint of the stored password hash. Placed in each session
+    at login; when the password changes the fingerprint no longer matches,
+    which invalidates every previously issued session (item: invalidate old
+    sessions after a password change/reset)."""
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
+
 def require_admin(view):
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
         username = session.get("admin_user")
         if not username:
             return jsonify({"error": "Not authenticated"}), 401
-        
+
         # Verify CSRF for state-changing operations
         if request.method in ("POST", "PUT", "DELETE"):
             if request.path not in ("/api/admin/login", "/api/admin/logout"):
                 _verify_csrf()
 
+        conn = db.get_db()
+        row = conn.execute(
+            "SELECT password_hash, must_change_password FROM admin_users WHERE username = %s",
+            (username,),
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            session.clear()
+            return jsonify({"error": "Not authenticated"}), 401
+
+        # If the password changed after this session was issued, the session
+        # fingerprint no longer matches: force re-login everywhere.
+        if session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
+            session.clear()
+            return jsonify({"error": "Session expired. Please log in again."}), 401
+
         if request.path != "/api/admin/change-password":
-            conn = db.get_db()
-            row = conn.execute(
-                "SELECT must_change_password FROM admin_users WHERE username = %s",
-                (username,),
-            ).fetchone()
-            conn.close()
-            if row and row["must_change_password"]:
+            if row["must_change_password"]:
                 return jsonify({"error": "Password change required.", "must_change_password": True}), 403
         return view(*args, **kwargs)
     return wrapped
@@ -438,25 +457,30 @@ def api_track_visitor():
         return jsonify({"ok": True, "new_visitor": False, "count": count, "mode": mode})
 
     data = request.get_json(silent=True) or {}
-    visitor_id = (data.get("visitor_id") or "").strip()
-    
-    cookie_id = request.cookies.get("ladli_visitor_id")
-    if not visitor_id and cookie_id:
-        visitor_id = cookie_id
+    posted_id = (data.get("visitor_id") or "").strip()
 
-    if not visitor_id or len(visitor_id) > 128:
+    # The HttpOnly server cookie is authoritative: an already-identified
+    # browser cannot inflate the counter by posting freshly generated ids.
+    cookie_id = request.cookies.get("ladli_visitor_id")
+    visitor_id = cookie_id or posted_id
+
+    if not visitor_id:
+        # First contact from a client that sent nothing usable: mint the id
+        # server-side rather than trusting arbitrary client input.
+        visitor_id = uuid.uuid4().hex
+    if len(visitor_id) > 128:
         return jsonify({"ok": False, "error": "Invalid visitor id."}), 400
 
     token = _hash_visitor_id(visitor_id)
     is_new_visitor, _unique_total = db.record_unique_visitor(token)
     count, mode = db.get_display_visitor_count()
-    
+
     res = jsonify({"ok": True, "new_visitor": is_new_visitor, "count": count, "mode": mode})
     res.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    
-    if not request.cookies.get("ladli_visitor_id"):
+
+    if not cookie_id:
         res.set_cookie("ladli_visitor_id", visitor_id, max_age=31536000, httponly=True, secure=app.config["SESSION_COOKIE_SECURE"], samesite="Lax")
-        
+
     return res
 
 @app.route("/api/visitor-count")
@@ -496,21 +520,27 @@ def api_admin_login():
 
     if not row or not check_password_hash(row["password_hash"], password):
         db.record_login_attempt(username, ip_address, success=False)
-        logger.warning(f"Failed login attempt for username {username} from {ip_address}")
-        error = "Invalid username or password."
+        # Differentiate failures internally (logs) while returning one safe,
+        # generic public message that never confirms account existence.
         if row:
             changed_ago = db.find_password_in_history(username, password, row["password_hash"])
             if changed_ago:
-                error = f"This password was changed {changed_ago}. Please use your newest password."
+                logger.warning(
+                    f"Failed login for '{username}' from {ip_address}: "
+                    f"used an old password (changed {changed_ago})"
+                )
             else:
-                error = "Wrong password! Please check your credentials and try again."
-        return jsonify({"ok": False, "error": error}), 401
+                logger.warning(f"Failed login for '{username}' from {ip_address}: wrong password")
+        else:
+            logger.warning(f"Failed login for unknown account from {ip_address}")
+        return jsonify({"ok": False, "error": "Invalid username or password."}), 401
 
     db.record_login_attempt(username, ip_address, success=True)
     db.clear_login_attempts(username, ip_address)
 
     session.clear()
     session["admin_user"] = username
+    session["pw_fp"] = _password_fingerprint(row["password_hash"])
     session.permanent = True
     logger.info(f"Successful login for username {username} from {ip_address}")
     
@@ -531,15 +561,18 @@ def api_admin_me():
     if session.get("admin_user"):
         conn = db.get_db()
         row = conn.execute(
-            "SELECT must_change_password, security_setup_completed FROM admin_users WHERE username = %s",
+            "SELECT password_hash, must_change_password, security_setup_completed FROM admin_users WHERE username = %s",
             (session["admin_user"],),
         ).fetchone()
         conn.close()
+        if not row or session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
+            session.clear()
+            return jsonify({"logged_in": False})
         return jsonify({
             "logged_in": True,
             "username": session["admin_user"],
-            "must_change_password": bool(row["must_change_password"]) if row else False,
-            "security_setup_completed": bool(row.get("security_setup_completed", 0)) if row else False,
+            "must_change_password": bool(row["must_change_password"]),
+            "security_setup_completed": bool(row.get("security_setup_completed", 0)),
         })
     return jsonify({"logged_in": False})
 

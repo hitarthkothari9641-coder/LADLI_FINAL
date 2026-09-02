@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/admin/assets/admin.css">
+<link rel="stylesheet" href="/admin/assets/admin_responsive.css">
 <link rel="icon" href="/assets/images/favicon.ico">
 <style>
   /* --- Visitor Management: mode toggle switch --------------------------- */
@@ -121,8 +122,9 @@
 
 <div class="topbar">
   <img src="/assets/images/ladli-logo.webp" alt="LADLI">
-  <button id="sidebar-toggle" aria-label="Menu">&#9776;</button>
+  <button id="sidebar-toggle" aria-label="Menu" aria-expanded="false" aria-controls="admin-sidebar">&#9776;</button>
 </div>
+<div class="sidebar-backdrop" aria-hidden="true"></div>
 
 <div class="app-shell">
   <aside class="sidebar">
