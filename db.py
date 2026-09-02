@@ -1,14 +1,16 @@
 """
 db.py — PostgreSQL data-access layer for the LADLI backend.
 
-Supports PostgreSQL through either driver (with connection pooling,
-dictionary cursors, and automatic schema initialization), auto-detected
-at import time:
+Supports PostgreSQL through any of three drivers (with connection
+pooling, dictionary rows, and automatic schema initialization),
+auto-detected at import time in this order:
 
-  - psycopg2 (psycopg2-binary) — preferred when installed
-  - psycopg  (psycopg 3, `pip install "psycopg[binary]"`) — used as a
-    fallback; required on newer Python versions (3.13+) where
-    psycopg2-binary may not ship prebuilt wheels yet.
+  - psycopg2 (psycopg2-binary)     — preferred when installed (Linux prod)
+  - psycopg  (psycopg 3, [binary]) — modern fallback for newer Pythons
+  - pg8000                         — pure-Python fallback; installs on ANY
+                                     Python/platform (used on Windows dev
+                                     machines where neither binary driver
+                                     ships a matching wheel)
 
 Connection settings come from DATABASE_URL or the individual PG*
 environment variables.
@@ -35,7 +37,11 @@ except ImportError:
         from psycopg.rows import dict_row
         PG_DRIVER = "psycopg3"
     except ImportError:
-        PG_DRIVER = None
+        try:
+            from pg8000 import dbapi as pg8000_dbapi  # pure Python — works everywhere
+            PG_DRIVER = "pg8000"
+        except ImportError:
+            PG_DRIVER = None
 
 # Kept for backwards compatibility with existing checks.
 PSYCOPG2_AVAILABLE = PG_DRIVER is not None
@@ -98,7 +104,7 @@ def _get_pg_pool():
 # Unified Database Cursor & Connection Wrapper
 # ---------------------------------------------------------------------------
 class PostgresCursorWrapper:
-    """Wraps psycopg2 RealDictCursor to provide uniform row access and rowcount."""
+    """Wraps the DB driver cursor to provide uniform dict-row access and rowcount."""
 
     def __init__(self, cursor, conn):
         self._cursor = cursor
@@ -122,13 +128,22 @@ class PostgresCursorWrapper:
             self._cursor.execute(formatted_sql)
         return self
 
+    def _to_dict(self, row):
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return dict(row)
+        # pg8000 (and plain cursors) return sequences — build dicts from
+        # the cursor description so callers always get dict rows.
+        columns = [d[0] for d in (self._cursor.description or [])]
+        return dict(zip(columns, row))
+
     def fetchone(self):
-        row = self._cursor.fetchone()
-        return dict(row) if row is not None else None
+        return self._to_dict(self._cursor.fetchone())
 
     def fetchall(self):
         rows = self._cursor.fetchall()
-        return [dict(r) for r in rows] if rows else []
+        return [self._to_dict(r) for r in rows] if rows else []
 
     @property
     def rowcount(self):
@@ -149,13 +164,27 @@ class PostgresConnectionWrapper:
     def execute(self, sql, params=None):
         if PG_DRIVER == "psycopg2":
             cursor = self._conn.cursor(cursor_factory=RealDictCursor)
-        else:  # psycopg 3
+        elif PG_DRIVER == "psycopg3":
             cursor = self._conn.cursor(row_factory=dict_row)
+        else:  # pg8000 — plain cursor; wrapper converts rows to dicts
+            cursor = self._conn.cursor()
         wrapper = PostgresCursorWrapper(cursor, self)
         wrapper.execute(sql, params)
         return wrapper
 
     def executescript(self, script):
+        if PG_DRIVER == "pg8000":
+            # pg8000 executes one statement at a time; the schema script
+            # contains no procedural bodies, so splitting on ';' is safe.
+            cursor = self._conn.cursor()
+            try:
+                for statement in script.split(";"):
+                    if statement.strip():
+                        cursor.execute(statement)
+            finally:
+                cursor.close()
+            self._conn.commit()
+            return
         with self._conn.cursor() as cur:
             cur.execute(script)
         self._conn.commit()
@@ -186,11 +215,31 @@ class PostgresConnectionWrapper:
             self.commit()
         self.close()
 
+def _pg8000_connect(params):
+    """Opens a pg8000 connection, translating libpq-style params."""
+    kwargs = {
+        "user": params.get("user"),
+        "database": params.get("dbname"),
+        "port": int(params.get("port") or 5432),
+    }
+    if params.get("password"):
+        kwargs["password"] = params["password"]
+    host = params.get("host")
+    if host and host.startswith("/"):
+        # Unix-socket directory (libpq style) → full socket path for pg8000
+        kwargs["unix_sock"] = f"{host}/.s.PGSQL.{kwargs['port']}"
+    elif host:
+        kwargs["host"] = host
+    sslmode = (params.get("sslmode") or "").lower()
+    if sslmode in ("require", "verify-ca", "verify-full"):
+        kwargs["ssl_context"] = True
+    return pg8000_dbapi.connect(**kwargs)
+
 def get_db():
     """
     Returns an active database connection wrapper.
     Connects to PostgreSQL with whichever driver is installed
-    (psycopg2 preferred, psycopg 3 as fallback).
+    (psycopg2 preferred, then psycopg 3, then pure-Python pg8000).
     """
     if PG_DRIVER and is_postgres_configured():
         try:
@@ -201,15 +250,17 @@ def get_db():
             params = get_pg_connection_params()
             if PG_DRIVER == "psycopg2":
                 conn = psycopg2.connect(**params)
-            else:  # psycopg 3
+            elif PG_DRIVER == "psycopg3":
                 conn = psycopg.connect(**params)
+            else:
+                conn = _pg8000_connect(params)
             return PostgresConnectionWrapper(conn, from_pool=False)
         except Exception as e:
             raise RuntimeError(f"Could not connect to PostgreSQL database: {e}")
 
     raise RuntimeError(
         "No PostgreSQL driver is available or the database is not configured. "
-        "Install 'psycopg2-binary' (or 'psycopg[binary]' on Python 3.13+) and "
+        "Install 'psycopg2-binary', 'psycopg[binary]', or 'pg8000' and "
         "set DATABASE_URL or PGHOST/PGDATABASE/PGUSER."
     )
 
