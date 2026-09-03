@@ -30,7 +30,9 @@ import db
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SITE_DIR = os.path.join(BASE_DIR, "site")
 ADMIN_DIR = os.path.join(BASE_DIR, "admin")
-ATTACHMENT_DIR = os.path.join(BASE_DIR, "attachments")
+# Serverless/read-only filesystems (e.g. Vercel) can override this with a
+# writable path such as /tmp/attachments. S3 remains the durable store.
+ATTACHMENT_DIR = os.environ.get("ATTACHMENT_DIR") or os.path.join(BASE_DIR, "attachments")
 MAX_UPLOAD_MB = 25
 MAX_ATTACHMENT_MB = 3
 
@@ -55,7 +57,13 @@ def _load_local_env_file():
                 os.environ[key] = value
 
 _load_local_env_file()
-os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+try:
+    os.makedirs(ATTACHMENT_DIR, exist_ok=True)
+except OSError:
+    # Read-only filesystem (serverless): fall back to a temp directory.
+    import tempfile
+    ATTACHMENT_DIR = os.path.join(tempfile.gettempdir(), "ladli-attachments")
+    os.makedirs(ATTACHMENT_DIR, exist_ok=True)
 
 # Logging
 logging.basicConfig(
@@ -83,11 +91,17 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FLASK_ENV") == "production" or _env_flag("FORCE_SECURE_COOKIES")
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(minutes=30)
 
-db.init_db(
-    default_username=os.environ.get("ADMIN_USERNAME", "admin"),
-    default_password=os.environ.get("ADMIN_PASSWORD"),
-    default_email=os.environ.get("ADMIN_EMAIL"),
-)
+# Schema + first-run admin bootstrap. Wrapped so a transient database outage
+# during a cold start (Render free tier / serverless) surfaces through
+# /health instead of crashing the whole worker at import time.
+try:
+    db.init_db(
+        default_username=os.environ.get("ADMIN_USERNAME", "admin"),
+        default_password=os.environ.get("ADMIN_PASSWORD"),
+        default_email=os.environ.get("ADMIN_EMAIL"),
+    )
+except Exception as _init_err:  # pragma: no cover
+    logger.error("Database initialisation failed at startup: %s", _init_err)
 
 # ---------------------------------------------------------------------------
 # S3 Attachment Handling

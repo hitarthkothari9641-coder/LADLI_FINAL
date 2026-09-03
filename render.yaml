@@ -1,0 +1,83 @@
+# =============================================================================
+# render.yaml — Render Blueprint for LADLI (100% free tier, $0 billing)
+# =============================================================================
+# Create the stack:  Render Dashboard → New → Blueprint → pick this repo.
+# Everything below uses plan "free" — no credit card, no billing.
+#
+# Notes about the free tier:
+#   * Free web services sleep after ~15 min of inactivity and cold-start in
+#     ~30-60 s on the next request. This is expected, not a bug.
+#   * The free PostgreSQL instance is fully managed; back it up before its
+#     expiry date shown in the Render dashboard.
+#   * Free instances have an ephemeral disk, so quote-attachment PDFs are
+#     only durable when AWS S3 is configured (AWS_S3_BUCKET / AWS_REGION /
+#     credentials). Without S3 the app still works, but uploaded PDFs are
+#     lost on redeploy/sleep.
+# =============================================================================
+
+databases:
+  - name: ladli-db
+    databaseName: ladli_db
+    user: ladli_app
+    plan: free
+
+services:
+  - type: web
+    name: ladli
+    runtime: python
+    plan: free
+    region: singapore          # closest free region to India; change if needed
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn -c gunicorn.conf.py app:app
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # --- Database (wired automatically from the free Postgres above) -----
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ladli-db
+          property: connectionString
+      - key: PGSSLMODE
+        value: require
+
+      # --- Flask ------------------------------------------------------------
+      - key: SECRET_KEY
+        generateValue: true     # Render generates a strong random value
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: FORCE_SECURE_COOKIES
+        value: "true"
+      - key: TRUSTED_PROXY_COUNT
+        value: "1"
+
+      # --- Gunicorn (small footprint for the 512 MB free instance) ---------
+      - key: GUNICORN_WORKERS
+        value: "2"
+      - key: GUNICORN_THREADS
+        value: "4"
+
+      # --- First-run admin account -----------------------------------------
+      # Set ADMIN_PASSWORD yourself in the Render dashboard (marked sync:false
+      # so it is never stored in git). Change it after the first login.
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+
+      # --- Optional: AWS S3 attachment storage ------------------------------
+      # - key: AWS_S3_BUCKET
+      #   sync: false
+      # - key: AWS_REGION
+      #   value: ap-south-1
+      # - key: AWS_ACCESS_KEY_ID
+      #   sync: false
+      # - key: AWS_SECRET_ACCESS_KEY
+      #   sync: false

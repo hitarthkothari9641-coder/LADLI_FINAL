@@ -11,7 +11,12 @@ import os
 # ---------------------------------------------------------------------------
 # Server socket
 # ---------------------------------------------------------------------------
-bind = os.environ.get("GUNICORN_BIND", "0.0.0.0:8000")
+# PaaS platforms (Render, Railway, Heroku…) inject the port to listen on via
+# $PORT — honour it automatically so no extra configuration is required.
+bind = os.environ.get(
+    "GUNICORN_BIND",
+    "0.0.0.0:{}".format(os.environ.get("PORT", "8000")),
+)
 
 # ---------------------------------------------------------------------------
 # Worker processes
