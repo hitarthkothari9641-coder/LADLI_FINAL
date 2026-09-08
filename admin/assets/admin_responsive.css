@@ -1,0 +1,80 @@
+/* Append responsive styles to admin.css */
+
+/* ---------- Responsive Overhaul ---------- */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 35, 63, 0.4);
+  z-index: 400;
+  opacity: 0;
+  transition: opacity 220ms var(--ease-out);
+}
+.sidebar-backdrop.is-visible { display: block; opacity: 1; }
+
+@media (max-width: 900px) {
+  .app-shell { flex-direction: column; }
+  .sidebar {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 280px;
+    max-width: 85vw;
+    z-index: 500;
+    transform: translateX(-100%);
+    transition: transform 260ms var(--ease-out);
+    background: var(--white);
+  }
+  .sidebar.is-open {
+    display: flex;
+    transform: translateX(0);
+  }
+  .topbar { display: flex; }
+  .main { padding: 22px 18px 60px; }
+  .stat-row { grid-template-columns: repeat(2, 1fr); }
+  body.sidebar-open { overflow: hidden; }
+}
+
+@media (max-width: 640px) {
+  .stat-row { grid-template-columns: 1fr; }
+  
+  .inquiry-item {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .inquiry-actions {
+    align-items: stretch;
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+  .status-select { flex: 1; }
+  .delete-inquiry { flex: 0 0 auto; }
+  
+  .settings-grid { grid-template-columns: 1fr; }
+  .detail-drawer { width: 100vw; max-width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .auth-card { padding: 28px 20px; border-radius: 16px; }
+  .mode-toggle-row { flex-direction: column; align-items: stretch; }
+  .mode-switch { width: 100%; height: 48px; }
+  .mode-switch-knob { height: 42px; width: calc(50% - 3px); }
+  .mode-switch[data-mode="manual"] .mode-switch-knob { transform: translateX(100%); }
+}
+
+/* Touch targets & accessibility */
+input, select, textarea, button, .chip, .side-link {
+  min-height: 44px;
+}
+.search-field input { padding-top: 12px; padding-bottom: 12px; }
+.password-toggle { width: 44px; height: 44px; }
+.auth-card { margin: auto; }
+.auth-screen { padding: 16px; }
+@media (max-width: 420px) {
+  .auth-card { max-width: 100%; }
+}
+
+input, select, textarea { font-size: 16px !important; } /* prevents iOS zoom */
