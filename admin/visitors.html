@@ -169,7 +169,7 @@
     <div class="page-head">
       <div>
         <h1>Visitor Management</h1>
-        <p>Auto mode shows the total number of unique devices/browsers that have ever visited the site. Manual mode shows a fixed number you choose. Stats auto-refresh every 10 seconds.</p>
+        <p>Auto mode shows the total number of unique devices/browsers that have ever visited the site. Manual mode shows a fixed number you choose. Off hides the visitor counter (icon and number) from the website completely. Stats auto-refresh every 10 seconds.</p>
       </div>
     </div>
 
@@ -187,7 +187,8 @@
       <h3 style="margin:0 0 4px">Display Mode</h3>
       <p style="margin:0 0 18px;color:var(--ink-60);font-size:13.5px">
         <strong>Auto</strong> — counts every unique device/browser that has ever visited the site (a persistent id stored in that visitor's browser, not a page-view or session count).<br>
-        <strong>Manual</strong> — shows whatever fixed number you type in below.
+        <strong>Manual</strong> — shows whatever fixed number you type in below.<br>
+        <strong>Off</strong> — hides the counter (icon and number) from the website entirely.
       </p>
       <div class="mode-toggle-row">
           <div class="mode-options" id="mode-options" role="radiogroup" aria-label="Visitor counter display mode">
@@ -295,7 +296,8 @@ async function load() {
 function render(stats) {
   document.getElementById('stat-unique').textContent = stats.unique_count.toLocaleString();
   document.getElementById('stat-manual').textContent = stats.manual_count.toLocaleString();
-  document.getElementById('stat-mode').textContent = stats.mode === 'manual' ? 'Manual' : 'Auto';
+  document.getElementById('stat-mode').textContent =
+    stats.mode === 'manual' ? 'Manual' : (stats.mode === 'hidden' ? 'Off' : 'Auto');
   currentMode = stats.mode;
 
   document.querySelectorAll('.mode-option').forEach((btn) => {

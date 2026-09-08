@@ -169,10 +169,19 @@
   // id — refreshes, new tabs and return visits from the same browser are
   // never recounted. The server prefers its own cookie over anything the
   // page posts, so the counter cannot be inflated from client-side code.
+  //
+  // The server is the single source of truth for whether the badge may be
+  // shown at all. The badge is therefore NEVER painted from local storage
+  // before the server answers: when the admin switches Visitor Management
+  // to "Off" (mode "hidden"), the icon + count must not appear on the
+  // website — not even as a one-frame flash while a request is in flight
+  // (serverless cold starts can take seconds). Storage is only consulted
+  // as an OFFLINE fallback, and only ever replays the LAST known server
+  // answer (a visible mode), never a bare number.
   (function initVisitorBadge() {
     const STORAGE_KEY = 'ladli_visitor_id';
-    const CACHE_KEY = 'ladli_visitor_count_cache';
-    const HIDDEN_KEY = 'ladli_visitor_count_hidden';
+    const CACHE_KEY = 'ladli_visitor_count_cache'; // JSON { count, mode } — last server answer
+    const HIDDEN_KEY = 'ladli_visitor_count_hidden'; // legacy marker for the "Off" state
 
     const style = document.createElement('style');
     style.textContent = `
@@ -224,25 +233,49 @@
     function label(count) {
       return count.toLocaleString() + ' Total Visitors';
     }
-        // Counter switched off in the admin: remove any painted badge and drop
-    // the cached number so it cannot reappear on the next page load.
-    function hideBadge() {
-      try { localStorage.removeItem(CACHE_KEY); localStorage.setItem(HIDDEN_KEY, '1');} catch (e) { /* ignore */ }
+
+    function removeBadge() {
       if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
       badge = null;
       textSpan = null;
     }
 
+    // Persist what the server just told us so the state survives page loads
+    // and (as a fallback) brief outages. An "Off" answer clears any stored
+    // number and sets HIDDEN_KEY so the badge can never be repainted from
+    // storage afterwards.
+    function rememberState(mode, count) {
+      try {
+        if (mode === 'hidden') {
+          localStorage.removeItem(CACHE_KEY);
+          localStorage.setItem(HIDDEN_KEY, '1');
+        } else {
+          localStorage.removeItem(HIDDEN_KEY);
+          if (typeof count === 'number' && !Number.isNaN(count)) {
+            localStorage.setItem(CACHE_KEY, JSON.stringify({ count: count, mode: mode }));
+          }
+        }
+      } catch (e) { /* storage unavailable (private mode, quota, etc.) — non-critical */ }
+    }
+
+    // Apply the server's authoritative answer about the visitor counter.
+    // Mode "hidden" (the admin's "Off" switch) removes the badge — icon and
+    // text together — immediately and keeps it off. Any other mode draws
+    // (or updates) the badge with the number the server returned.
     function applyStats(data) {
       if (!data) return;
-      if (data.mode === 'hidden') { hideBadge(); return; }
-      try { localStorage.removeItem(HIDDEN_KEY); } catch (e) { /* ignore */ }
+      if (data.mode === 'hidden') {
+        rememberState('hidden', null);
+        removeBadge();
+        return;
+      }
+      rememberState(data.mode, data.count);
       renderCount(data.count);
     }
-    // Renders (or creates, on first call) the badge. Also called
-    // immediately with a locally-cached number — if we have one — before
-    // the network request resolves, so the badge appears fully formed on
-    // first paint instead of popping in a moment later or flashing "0".
+
+    // Renders (or creates, on first call) the badge. Only ever called with a
+    // number that a live server response — or a stored visible-mode answer —
+    // has sanctioned, never speculatively before the first server reply.
     function renderCount(count) {
       if (typeof count !== 'number' || Number.isNaN(count)) return;
       const text = label(count);
@@ -261,20 +294,25 @@
       } else {
         textSpan.textContent = text;
       }
-      try {
-        localStorage.setItem(CACHE_KEY, String(count));
-      } catch (e) { /* localStorage unavailable (private mode, quota, etc.) — non-critical */ }
     }
 
-    // Paint instantly from whatever we displayed last time, so the badge
-    // never flickers in empty and then jumps to a number a moment later.
-    try {
-      if (localStorage.getItem(HIDDEN_KEY) !== '1') {
-        const cached = localStorage.getItem(CACHE_KEY);
-        if (cached !== null) renderCount(parseInt(cached, 10));
-      }
+    // Offline / server-unreachable fallback. This replays ONLY the last
+    // answer the server actually gave: a stored "visible" answer repaints
+    // its cached number; an "Off" answer (or no stored answer at all) leaves
+    // the badge hidden. There is no path that paints the icon from a bare
+    // cached count, so a counter switched Off can never flash back.
+    function renderCachedIfVisible() {
+      try {
+        if (localStorage.getItem(HIDDEN_KEY) === '1') return;
+        const raw = localStorage.getItem(CACHE_KEY);
+        if (!raw) return;
+        const cached = JSON.parse(raw);
+        if (cached && (cached.mode === 'auto' || cached.mode === 'manual') && typeof cached.count === 'number') {
+          renderCount(cached.count);
+        }
+      } catch (e) { /* missing or legacy cache — stay hidden until the server answers */ }
     }
-    catch (e) { /* non-critical */ }
+
     let visitorId = null;
     try {
       // localStorage (not sessionStorage) is deliberate: the id must be
@@ -297,6 +335,16 @@
     // the lifetime total the first time it ever sees this browser (by
     // HttpOnly cookie first, then the posted id), so refreshes, extra tabs
     // and repeat visits never inflate the count.
+    function queryCountFallback() {
+      fetch('/api/visitor-count', { cache: 'no-store', credentials: 'same-origin' })
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          if (data) applyStats(data);
+          else renderCachedIfVisible();
+        })
+        .catch(renderCachedIfVisible);
+    }
+
     fetch('/api/visitor-register', {
       method: 'POST',
       cache: 'no-store',
@@ -305,14 +353,32 @@
       body: JSON.stringify({ visitor_id: visitorId }),
     })
       .then(res => (res.ok ? res.json() : null))
-      .then(data => { if (data && data.ok) applyStats(data); })
-      .catch(() => {
-        // Registration failed (offline, rate-limited…) — still try to show
-        // the current total so the badge renders a real number.
-        fetch('/api/visitor-count', { cache: 'no-store', credentials: 'same-origin' })
-          .then(res => (res.ok ? res.json() : null))
-          .then(data => { if (data) applyStats(data); })
-          .catch(() => { /* non-critical */ });
-      });
+      .then(data => {
+        if (data && data.ok) {
+          applyStats(data);
+          return;
+        }
+        // Registration failed (rate-limited, transient error…) — try the
+        // read-only endpoint so the badge still gets a live answer.
+        queryCountFallback();
+      })
+      .catch(queryCountFallback);
+
+    // Keep checking while the page stays open so that a counter the admin
+    // switches Off disappears from ALREADY-OPEN pages too — not only on the
+    // next page load. Also re-check the moment the tab regains focus (the
+    // typical way an admin returns to the public site after flipping the
+    // switch). Failing checks leave the current state untouched.
+    function pollCount() {
+      fetch('/api/visitor-count', { cache: 'no-store', credentials: 'same-origin' })
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => { if (data) applyStats(data); })
+        .catch(() => { /* transient — keep current state */ });
+    }
+    setInterval(pollCount, 10000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') pollCount();
+    });
+    window.addEventListener('focus', pollCount);
   })();
 })();
