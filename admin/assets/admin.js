@@ -8,7 +8,9 @@ const Admin = (() => {
   async function getCsrfToken() {
     if (csrfToken) return csrfToken;
     try {
-      const res = await fetch('/api/admin/csrf-token', { credentials: 'same-origin' });
+      // cache: 'no-store' — admin assets are browser-cached, but the CSRF
+      // token must always come fresh from the server (same-origin fetch).
+      const res = await fetch('/api/admin/csrf-token', { credentials: 'same-origin', cache: 'no-store' });
       const data = await res.json();
       csrfToken = data.csrf_token;
       return csrfToken;

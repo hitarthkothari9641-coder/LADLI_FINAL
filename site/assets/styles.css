@@ -1476,6 +1476,22 @@ h1 {
   opacity: .95
 }
 
+/* Grid column-count utilities.
+   Single-class (0,1,0) specificity on purpose: they only set the DESKTOP
+   column count for grids whose markup carries fewer items than the generic
+   grid default. Because they appear before the responsive media queries, the
+   later, equally-specific media rules still collapse these grids on
+   tablet/mobile. Do not move after the media queries and do not write them as
+   `.test-grid.cols-3` (compound selectors would out-specify and freeze the
+   grids at desktop columns on every viewport). */
+.cols-3 {
+  grid-template-columns: repeat(3, 1fr)
+}
+
+.cols-4 {
+  grid-template-columns: repeat(4, 1fr)
+}
+
 .notice {
   border: 2px solid var(--orange);
   background: var(--orange-12);
@@ -3180,4 +3196,225 @@ a[href^="mailto:"], a[href^="tel:"] {
 /* Laptop - Large */
 @media (max-width: 1280px) {
   .container { max-width: 1140px; }
+}
+/* =========================================================
+   FINAL RESPONSIVE LAYOUT HARDENING (non-redesign fixes)
+   ---------------------------------------------------------
+   · Drawer reachability: the hamburger/X lives inside the
+     sticky header's stacking context. Previously the header
+     (z 1001 while open) sat BELOW the drawer (z 1002), so the
+     drawer panel painted over the toggle and the X could
+     neither be seen nor clicked — the menu felt broken.
+     Raising the open header above the drawer restores the
+     visible, clickable X without changing any visuals.
+   · Drawer geometry per spec: width min(85vw, 360px).
+   · Generic image containment so oversized artwork can never
+     push the document wider than the viewport.
+   · >= 48px tap target floor for the sticky mobile bar.
+   · Long unbroken tokens wrap on small phones instead of
+     creating horizontal overflow.
+   ========================================================= */
+
+body.menu-open .site-header {
+  z-index: 1003 !important;
+}
+
+@media (max-width: 1024px) {
+  .nav {
+    width: min(85vw, 360px);
+    padding-top: 96px;
+  }
+}
+
+.site img {
+  max-width: 100%;
+}
+
+@media (max-width: 768px) {
+  .mobile-action-bar a {
+    min-height: 48px;
+  }
+}
+
+@media (max-width: 767px) {
+  a,
+  p,
+  li,
+  td,
+  th,
+  h1,
+  h2,
+  h3,
+  strong,
+  span {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* =========================================================
+   PERFECT MOBILE RESPONSIVE LAYER
+   ---------------------------------------------------------
+   Breakpoint contract (requested):
+     Mobile  <= 767px   -> single column, drawer nav, sticky bar
+     Tablet   768-1023  -> dedicated tablet layout, no mobile bar
+     Desktop >= 1024px  -> existing desktop design untouched
+   This block is append-only and additive. Every rule here
+   either restores the intended responsive cascade or hardens
+   against regressions; nothing removes or rewrites the
+   existing desktop/tablet styling.
+   ========================================================= */
+
+/* 1. Hard viewport containment — no horizontal document growth */
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* 2. Fluid images — capped so no intrinsic image can overflow its
+      column. (height:auto is deliberately NOT applied globally: fixed
+      cover-height compositions such as .photo-band, .map-card and the
+      equipment cards are part of the existing design and keep their
+      own object-fit/height rules. Fully fluid images — hero frames,
+      .split-media, photo bands on mobile — already declare
+      width:100%; height:auto on their own rules.) */
+.site img {
+  display: block;
+}
+
+/* 3. Navigation drawer layer — spec geometry + stacking that keeps
+      the drawer a true overlay (never a second page column):
+        .nav-backdrop  z 9800  (dims ALL page content incl. header area)
+        .nav           z 9900  (opaque drawer panel)
+        .site-header   z 9990  only while open, so the hamburger's
+                                "X" stays visible/clickable above both
+      The 100vh fallback keeps the panel full-height on older mobile
+      browsers that do not support 100dvh. */
+@media (max-width: 1024px) {
+  .nav {
+    z-index: 9900 !important;
+    width: min(85vw, 360px);
+    height: 100vh; /* fallback */
+    height: 100dvh; /* modern — respects dynamic browser chrome */
+    padding-top: 96px;
+  }
+
+  .nav-backdrop {
+    z-index: 9800;
+  }
+
+  body.menu-open .site-header {
+    z-index: 9990 !important;
+  }
+}
+
+/* 4. MOBILE <= 767px — strictly single column, viewport-safe */
+@media (max-width: 767px) {
+  /* 4a. Container gutter: ~16px each side on small phones */
+  .container {
+    width: min(calc(100% - 32px), var(--max));
+    margin-inline: auto;
+  }
+
+  /* 4b. Every section grid collapses to a single column.
+         Compound selectors are listed so they out-cascade their own
+         higher-specificity 2/3-col definitions from earlier tiers. */
+  .card-grid,
+  .card-grid.four,
+  .card-grid.two,
+  .industry-grid,
+  .test-grid,
+  .gas-grid,
+  .stats-panel,
+  .process-track,
+  .value-strip-inner,
+  .contact-grid,
+  .form-grid,
+  .footer-grid,
+  .page-index-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 4c. Buttons: tappable (>=48px) and primary CTAs full width */
+  .btn {
+    min-height: 48px;
+  }
+
+  .hero-actions {
+    gap: 12px;
+  }
+
+  .hero-actions .btn,
+  .cta-actions .btn {
+    width: 100%;
+  }
+
+  /* 4d. Hero is one stacked column in DOM order:
+         badge -> heading -> lead -> CTA -> CTA -> highlights,
+         then image -> caption card -> benefit cards below. */
+  .hero-grid {
+    grid-template-columns: 1fr;
+    gap: 26px;
+  }
+
+  .hero-copy {
+    order: 1;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .hero-visual {
+    order: 2;
+    width: 100%;
+    max-width: 100%;
+    margin-inline: 0;
+  }
+
+  .hero-visual .photo-frame {
+    width: 100%;
+  }
+
+  /* 4e. No element inside a section may outgrow the viewport */
+  .split-copy,
+  .split-media,
+  .section-head,
+  .cta-panel,
+  .form-card,
+  .notice,
+  .photo-band {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+}
+
+/* 5. TABLET 768px-1023px — dedicated layout (not compressed desktop,
+      not mobile). The mobile sticky bar belongs to phones only. */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .mobile-action-bar {
+    display: none !important;
+  }
+
+  body {
+    padding-bottom: 0;
+  }
+
+  .container {
+    width: min(calc(100% - 48px), var(--max));
+  }
+
+  /* Related-test / test grids: two comfortable columns on tablet */
+  .test-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Sitemap grid: two columns reads comfortably on tablet */
+  .page-index-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
