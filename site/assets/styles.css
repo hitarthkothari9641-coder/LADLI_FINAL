@@ -3418,3 +3418,47 @@ body {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* =========================================================
+   HEADER OVERLAP FIX + BLANK PHOTO PLACEHOLDER
+   (Contact vs Request a Quote collision in the 1025-1200px
+   laptop zone; blank hero frames pending new photographs)
+   ========================================================= */
+
+/* Blank placeholder inside .photo-frame — same border, radius
+   and shadow as .photo-frame img so the hero frame keeps its
+   proportions until a real photograph is added. */
+.photo-frame .photo-blank {
+  width: 100%;
+  aspect-ratio: 1000 / 617;
+  border-radius: 34px;
+  border: 8px solid var(--white);
+  box-shadow: 0 16px 40px rgba(14, 27, 61, 0.12);
+  background: linear-gradient(135deg, var(--sky-12), var(--royal-12));
+  display: block;
+}
+
+/* Header: at 1025-1200px the 1:2:1 flex split starves the centre
+   nav, pushing Contact into the Request a Quote button. Size the
+   flanks to their content and let the nav take the remaining
+   space, with calibrated type/gap reductions. */
+@media (min-width: 1025px) and (max-width: 1200px) {
+  .header-left,
+  .header-right { flex: 0 0 auto; }
+  .header-center { flex: 1 1 auto; min-width: 0; }
+  .header-right { gap: 0.9rem; }
+  .nav { gap: 14px; }
+  .nav > a,
+  .nav-item > a { font-size: 14px; padding: 30px 4px 26px; }
+  .header-right .phone-link { font-size: 12.5px; gap: 6px; }
+  .header-right .btn-small { padding: 8px 12px; font-size: 12px; }
+}
+
+/* Tightest band: drop the header phone text (still in footer,
+   contact page and the mobile bar) so the nav never collides. */
+@media (min-width: 1025px) and (max-width: 1120px) {
+  .header-right .phone-link { display: none; }
+  .nav { gap: 12px; }
+  .nav > a,
+  .nav-item > a { font-size: 13.5px; }
+}
