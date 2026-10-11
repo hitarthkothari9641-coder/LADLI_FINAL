@@ -17,7 +17,7 @@ class AvailabilityTests(unittest.TestCase):
 
     def test_public_pages_and_assets_never_initialise_database(self):
         with patch.object(db, "init_db", side_effect=RuntimeError("offline")) as init:
-            for path in ("/", "/about.html", "/contact.html", "/healthz"):
+            for path in ("/", "/about.html", "/contact.html", "/health", "/healthz"):
                 with self.subTest(path=path):
                     with self.client.get(path) as response:
                         self.assertEqual(response.status_code, 200)
@@ -35,7 +35,7 @@ class AvailabilityTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 503)
                     self.assertFalse(response.json["ok"])
                     self.assertEqual(response.headers["Retry-After"], "30")
-                self.assertEqual(self.client.get("/health").status_code, 503)
+                self.assertEqual(self.client.get("/ready").status_code, 503)
                 self.assertEqual(self.client.get("/healthz").status_code, 200)
                 with self.client.get("/") as response:
                     self.assertEqual(response.status_code, 200)
@@ -57,12 +57,12 @@ class AvailabilityTests(unittest.TestCase):
         connection = Mock()
         connection.execute.side_effect = RuntimeError("connection lost")
         with patch.object(db, "get_db", return_value=connection):
-            self.assertEqual(self.client.get("/health").status_code, 503)
+            self.assertEqual(self.client.get("/ready").status_code, 503)
             connection.close.assert_called_once()
 
     def test_health_confirms_database_and_schema(self):
         with patch.object(db, "init_db"), patch.object(db, "get_db", return_value=Mock()):
-            response = self.client.get("/health")
+            response = self.client.get("/ready")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json["schema"], "ready")
 

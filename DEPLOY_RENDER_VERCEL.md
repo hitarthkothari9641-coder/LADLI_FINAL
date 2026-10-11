@@ -28,8 +28,9 @@ plus one free **PostgreSQL** database. No credit card is required.
    free database automatically.
 4. Wait for the first deploy. Render's health check path is `/healthz`, which
    confirms the web server is available independently of PostgreSQL. Verify
-   `https://<service>.onrender.com/health` separately: it must return HTTP 200
+   `https://<service>.onrender.com/ready` separately: it must return HTTP 200
    with `database: connected` and `schema: ready` before testing forms/admin.
+   The existing `/health` path also serves liveness for manually configured services.
    For an existing service, set **Settings → Health Checks → Path** to
    `/healthz` (or sync the updated Blueprint). A code redeploy alone does not
    change settings on a service created manually.
@@ -54,7 +55,7 @@ plus one free **PostgreSQL** database. No credit card is required.
 * `TRUSTED_PROXY_COUNT=1` so the real client IP is read from Render's proxy for
   rate limiting and lockouts.
 * Persistent PostgreSQL for admins, security questions, inquiries and visitors.
-* `/healthz` is the Render liveness check; `/health` checks database readiness.
+* `/healthz` is the Render liveness check; `/ready` checks database readiness.
 * Public pages and assets remain accessible when PostgreSQL is unavailable.
   APIs return HTTP 503 when schema bootstrap fails and retry after 30 seconds.
   Database connections time out after 5 seconds (`PGCONNECT_TIMEOUT` overrides).
@@ -69,7 +70,7 @@ Render allows upgrading an expired database during a 14-day grace period;
 after that it deletes the database. See https://render.com/docs/free.
 
 Deploy the availability fix and apply `/healthz` as the service health check.
-Confirm `/`, `/about.html` and assets return HTTP 200, then confirm `/health`
+Confirm `/`, `/about.html` and assets return HTTP 200, then confirm `/ready`
 returns HTTP 200 before validating quote/contact submissions and admin login.
 This code change cannot restore an expired database or resume a suspended
 Render service; those require action in the hosting account.
@@ -98,7 +99,7 @@ path into the same Flask app, so the public site and `/admin` both work.
    ADMIN_PASSWORD = <strong password>
    AWS_S3_BUCKET / AWS_REGION / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  # for PDF uploads
    ```
-3. Deploy, then check `/health` and log in at `/admin/login`.
+3. Deploy, then check `/ready` and log in at `/admin/login`.
 
 ### Serverless caveats you must accept
 
@@ -121,7 +122,7 @@ Vercel as an optional mirror/preview of the same codebase.
 
 ## Post-deploy checklist (both platforms)
 
-- [ ] `/health` → `{"database":"connected","status":"ok"}`
+- [ ] `/ready` → `{"database":"connected","status":"ok"}`
 - [ ] Home page loads with images and correct caching headers
 - [ ] `/api/visitor-count` increases once per unique visitor (not per refresh)
 - [ ] Contact and Quote forms submit; the inquiry appears in the admin dashboard

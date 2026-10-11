@@ -145,9 +145,9 @@ def ensure_db_ready():
 @app.before_request
 def _retry_db_init_if_needed():
     # Public HTML, assets and liveness must not depend on PostgreSQL.
-    if request.path.startswith("/api/") or request.path == "/health":
+    if request.path.startswith("/api/") or request.path == "/ready":
         if not ensure_db_ready():
-            if request.path == "/health":
+            if request.path == "/ready":
                 return jsonify({"status": "error", "database": "unavailable", "schema": "uninitialised"}), 503
             response = jsonify({"ok": False, "error": "The database is temporarily unavailable. Please try again shortly."})
             response.status_code = 503
@@ -379,13 +379,14 @@ def server_error(e):
 # ---------------------------------------------------------------------------
 # Core endpoints
 # ---------------------------------------------------------------------------
+@app.route("/health")
 @app.route("/healthz")
 def liveness():
     """Render liveness: the public website can serve requests without a DB."""
     return jsonify({"status": "ok"})
 
-@app.route("/health")
-def health():
+@app.route("/ready")
+def readiness():
     conn = None
     try:
         conn = db.get_db()
