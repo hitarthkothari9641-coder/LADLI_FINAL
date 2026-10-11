@@ -21,8 +21,6 @@ from flask import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
-import db
-
 # ---------------------------------------------------------------------------
 # Setup & Config
 # ---------------------------------------------------------------------------
@@ -57,6 +55,9 @@ def _load_local_env_file():
                 os.environ[key] = value
 
 _load_local_env_file()
+# Read database settings after loading local configuration.
+import db
+
 try:
     os.makedirs(ATTACHMENT_DIR, exist_ok=True)
 except OSError:
@@ -91,11 +92,11 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FLASK_ENV") == "production" or _env_flag("FORCE_SECURE_COOKIES")
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(minutes=30)
 
-# Schema + first-run admin bootstrap. Wrapped so a transient database outage
-# during a cold start (Render free tier / serverless) surfaces through
-# /health instead of crashing the whole worker at import time.
+# Bootstrap lazily for database requests, so an unavailable database cannot
+# hold up worker startup or the public website.
 _db_ready = False
 _db_init_lock = threading.Lock()
+_db_retry_at = 0.0
 _hinted = set()
 
 def _log_db_hint(err):
@@ -118,12 +119,14 @@ def _log_db_hint(err):
 
 def ensure_db_ready():
     """Run the schema bootstrap, retrying later if the first attempt failed."""
-    global _db_ready
+    global _db_ready, _db_retry_at
     if _db_ready:
         return True
     with _db_init_lock:
         if _db_ready:
             return True
+        if time.monotonic() < _db_retry_at:
+            return False
         try:
             db.init_db(
                 default_username=os.environ.get("ADMIN_USERNAME", "admin"),
@@ -134,21 +137,22 @@ def ensure_db_ready():
             logger.info("Database schema initialised successfully.")
             return True
         except Exception as init_err:
+            _db_retry_at = time.monotonic() + 30
             logger.error("Database initialisation failed: %s", init_err)
             _log_db_hint(init_err)
             return False
 
-for _attempt in range(6):
-    if ensure_db_ready():
-        break
-    if _attempt < 5:
-        logger.warning("Database not ready; retrying in 5s...")
-        time.sleep(5)
-
 @app.before_request
 def _retry_db_init_if_needed():
-    if not _db_ready:
-        ensure_db_ready()
+    # Public HTML, assets and liveness must not depend on PostgreSQL.
+    if request.path.startswith("/api/") or request.path == "/health":
+        if not ensure_db_ready():
+            if request.path == "/health":
+                return jsonify({"status": "error", "database": "unavailable", "schema": "uninitialised"}), 503
+            response = jsonify({"ok": False, "error": "The database is temporarily unavailable. Please try again shortly."})
+            response.status_code = 503
+            response.headers["Retry-After"] = "30"
+            return response
 # ---------------------------------------------------------------------------
 # S3 Attachment Handling
 # ---------------------------------------------------------------------------
@@ -375,14 +379,22 @@ def server_error(e):
 # ---------------------------------------------------------------------------
 # Core endpoints
 # ---------------------------------------------------------------------------
+@app.route("/healthz")
+def liveness():
+    """Render liveness: the public website can serve requests without a DB."""
+    return jsonify({"status": "ok"})
+
 @app.route("/health")
 def health():
+    conn = None
     try:
         conn = db.get_db()
         conn.execute("SELECT 1")
-        conn.close()
     except Exception:
         return jsonify({"status": "error", "database": "disconnected"}), 503
+    finally:
+        if conn is not None:
+            conn.close()
 
     if not _db_ready and not ensure_db_ready():
         return jsonify({"status": "error", "database": "connected",

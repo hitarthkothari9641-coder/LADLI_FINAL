@@ -23,6 +23,7 @@ import string
 import datetime
 import uuid
 import hashlib
+import threading
 from urllib.parse import urlparse
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -60,6 +61,7 @@ PGPASSWORD = os.environ.get("PGPASSWORD")
 PGSSLMODE = os.environ.get("PGSSLMODE", "prefer")
 
 _pg_pool = None
+_pg_pool_lock = threading.Lock()
 
 def is_postgres_configured():
     """Returns True if PostgreSQL connection parameters are configured."""
@@ -80,6 +82,7 @@ def get_pg_connection_params():
             "host": parsed.hostname,
             "port": parsed.port or 5432,
             "sslmode": PGSSLMODE if parsed.hostname not in ("localhost", "127.0.0.1") else "prefer",
+            "connect_timeout": int(os.environ.get("PGCONNECT_TIMEOUT", "5")),
         }
     return {
         "dbname": PGDATABASE,
@@ -88,6 +91,7 @@ def get_pg_connection_params():
         "host": PGHOST,
         "port": int(PGPORT) if PGPORT else 5432,
         "sslmode": PGSSLMODE,
+        "connect_timeout": int(os.environ.get("PGCONNECT_TIMEOUT", "5")),
     }
 
 def _get_pg_pool():
@@ -95,9 +99,10 @@ def _get_pg_pool():
     # Connection pooling is only used with psycopg2; with psycopg 3 the app
     # opens short-lived direct connections instead (identical behaviour,
     # no extra psycopg_pool dependency needed).
-    if _pg_pool is None and PG_DRIVER == "psycopg2" and is_postgres_configured():
-        params = get_pg_connection_params()
-        _pg_pool = pool.SimpleConnectionPool(1, 20, **params)
+    with _pg_pool_lock:
+        if _pg_pool is None and PG_DRIVER == "psycopg2" and is_postgres_configured():
+            params = get_pg_connection_params()
+            _pg_pool = pool.ThreadedConnectionPool(1, 20, **params)
     return _pg_pool
 
 # ---------------------------------------------------------------------------
@@ -221,6 +226,7 @@ def _pg8000_connect(params):
         "user": params.get("user"),
         "database": params.get("dbname"),
         "port": int(params.get("port") or 5432),
+        "timeout": params.get("connect_timeout", 5),
     }
     if params.get("password"):
         kwargs["password"] = params["password"]
