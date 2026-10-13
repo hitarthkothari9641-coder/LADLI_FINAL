@@ -415,6 +415,19 @@ _LONG_CACHE_EXTENSIONS = (
 def site_files(filename):
     if filename.startswith(("admin/", "data/")):
         abort(404)
+    # Consolidate duplicate home URLs and preserve older search-result links.
+    if filename in ("index", "index.html"):
+        return redirect("/", code=301)
+    retired_pages = {
+        "test-colour": "/test-appearance.html",
+        "test-resistivity": "/test-tan-delta.html",
+    }
+    retired_name = filename.removesuffix(".html")
+    if retired_name in retired_pages:
+        return redirect(retired_pages[retired_name], code=301)
+    if re.fullmatch(r"[a-z0-9-]+", filename):
+        if os.path.isfile(os.path.join(SITE_DIR, filename + ".html")):
+            return redirect("/" + filename + ".html", code=301)
     full_path = os.path.join(SITE_DIR, filename)
     if os.path.isfile(full_path):
         if filename.endswith(_LONG_CACHE_EXTENSIONS):

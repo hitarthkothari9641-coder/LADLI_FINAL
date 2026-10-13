@@ -3,4 +3,4 @@ Disallow: /admin/
 Disallow: /api/
 Disallow: /data/
 
-Sitemap: https://www.ladlielectricaltesting.com/sitemap.xml
+Sitemap: https://ladlilab.com/sitemap.xml
