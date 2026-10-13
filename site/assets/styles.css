@@ -3462,3 +3462,79 @@ body {
   .nav > a,
   .nav-item > a { font-size: 13.5px; }
 }
+
+/* Zoomed desktop widths need the same usable drawer as tablets. Keep
+   the page's desktop layout intact while preventing header collisions. */
+@media (min-width: 1025px) and (max-width: 1250px) {
+  .header-left,
+  .header-right { flex: 0 0 auto; }
+  .header-center { flex: 0 0 0; min-width: 0; }
+  .header-right { gap: 0.75rem; }
+  .header-right .phone-link { display: none; }
+  .header-right .btn-small { padding: 8px 12px; font-size: 12px; }
+  .menu-toggle { display: flex; }
+
+  .site-header { z-index: 1000; }
+  .nav {
+    position: fixed;
+    top: 0;
+    right: -100%;
+    width: min(85vw, 360px);
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    overflow-y: auto;
+    padding: 96px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+    background: #fff !important;
+    border-left: 1px solid var(--royal-18) !important;
+    box-shadow: -10px 0 40px rgba(10, 25, 47, 0.28) !important;
+    z-index: 9900 !important;
+    transition: right 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .nav.is-open { right: 0; }
+  .nav > a,
+  .nav-item > a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 48px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--royal-08);
+    border-radius: 14px;
+    background: transparent;
+    color: var(--royal) !important;
+    font-size: 16px;
+    white-space: normal;
+  }
+  .nav > a::after,
+  .nav-item > a::after { display: none; }
+  .nav-item { flex-direction: column; align-items: stretch; }
+  .nav-item > a::after {
+    display: block;
+    content: "+";
+    position: static;
+    height: auto;
+    transform: none;
+    background: none;
+    color: var(--pink);
+    font-size: 20px;
+  }
+  .nav-item.is-open > a::after { content: "−"; }
+  .mega {
+    position: static;
+    display: none;
+    width: 100%;
+    margin: 4px 0 8px;
+    padding: 8px;
+    transform: none;
+    grid-template-columns: 1fr;
+    background: #f4f7fb !important;
+    box-shadow: none;
+  }
+  .nav-item.is-open .mega { display: grid !important; }
+  .nav-backdrop { z-index: 9800; }
+  body.menu-open .site-header { z-index: 9990 !important; }
+}

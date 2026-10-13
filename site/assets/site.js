@@ -1,5 +1,6 @@
 (() => {
   // --- Mobile & Tablet Navigation Drawer Controller ---
+  const DRAWER_BREAKPOINT = 1250;
   function initMobileNav() {
     const menuToggle = document.querySelector('.menu-toggle');
     const nav = document.querySelector('.nav');
@@ -55,7 +56,7 @@
       // Check if clicking the dropdown parent link or header area (e.g. Services)
       const navItem = e.target.closest('.nav-item');
       if (navItem && !e.target.closest('.mega')) {
-        const isMobile = window.innerWidth <= 1024;
+        const isMobile = window.innerWidth <= DRAWER_BREAKPOINT;
         if (isMobile) {
           e.preventDefault();
           e.stopPropagation();
@@ -71,7 +72,7 @@
       // If clicking any actual navigation link (e.g. Home, About Us, or a link inside .mega)
       const link = e.target.closest('a');
       if (link) {
-        if (window.innerWidth <= 1024) {
+        if (window.innerWidth <= DRAWER_BREAKPOINT) {
           closeMenu();
         }
       }
@@ -86,7 +87,7 @@
 
     // Close mobile nav automatically if window is resized above tablet breakpoint
     window.addEventListener('resize', () => {
-      if (window.innerWidth > 1024 && nav.classList.contains('is-open')) {
+      if (window.innerWidth > DRAWER_BREAKPOINT && nav.classList.contains('is-open')) {
         closeMenu();
       }
     });
