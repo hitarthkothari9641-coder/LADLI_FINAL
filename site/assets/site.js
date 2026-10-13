@@ -1,6 +1,6 @@
 (() => {
   // --- Mobile & Tablet Navigation Drawer Controller ---
-  const DRAWER_BREAKPOINT = 1250;
+  const DRAWER_BREAKPOINT = 1500;
   function initMobileNav() {
     const menuToggle = document.querySelector('.menu-toggle');
     const nav = document.querySelector('.nav');
