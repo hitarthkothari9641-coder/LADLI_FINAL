@@ -58,12 +58,17 @@
     document.querySelectorAll(revealSelectors.join(',')).forEach(el => el.classList.add('is-visible'));
   }
 
-  /* ---------- 2. Sticky header shrink on scroll ---------- */
+  /* ---------- 2. Sticky header appearance without layout changes ---------- */
   const header = document.querySelector('.site-header');
   if (header) {
     let headerTicking = false;
     const updateHeaderState = () => {
-      header.classList.toggle('is-scrolled', window.scrollY > 24);
+      // Separate thresholds prevent rapid toggling during small scroll movements.
+      if (window.scrollY > 48) {
+        header.classList.add('is-scrolled');
+      } else if (window.scrollY <= 8) {
+        header.classList.remove('is-scrolled');
+      }
       headerTicking = false;
     };
     const onScroll = () => {

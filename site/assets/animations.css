@@ -186,12 +186,7 @@ body {
 }
 
 .brand img {
-  transition: width 240ms var(--ease-out), transform 240ms var(--ease-out);
-}
-
-.site-header.is-scrolled .brand img {
-  width: 138px;
-  transform: translateY(0);
+  transition: transform 240ms var(--ease-out);
 }
 
 /* Fallback for browsers without backdrop-filter support */
