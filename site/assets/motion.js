@@ -69,36 +69,40 @@
     });
   }
 
-  /* ---------- 4. Scroll progress bar ---------- */
+  /* ---------- 4. Scroll progress and hero decoration ---------- */
   const progress = document.createElement('div');
   progress.id = 'scroll-progress';
+  // Scale a fixed-size layer instead of triggering layout with width updates.
+  progress.style.width = '100%';
+  progress.style.transformOrigin = 'left';
+  progress.style.transition = reduceMotion ? 'none' : 'transform 120ms linear';
   document.body.appendChild(progress);
-  const updateProgress = () => {
+  const hero = !reduceMotion && document.querySelector('.hero');
+  let scrollFrame = null;
+  let lastShift = null;
+  const updateScrollEffects = () => {
+    scrollFrame = null;
     const h = document.documentElement;
-    const scrolled = h.scrollTop;
     const height = h.scrollHeight - h.clientHeight;
-    const pct = height > 0 ? (scrolled / height) * 100 : 0;
-    progress.style.width = pct + '%';
-  };
-  updateProgress();
-  window.addEventListener('scroll', updateProgress, { passive: true });
-
-  /* ---------- 5. Parallax on hero decoration (subtle, capped) ---- */
-  if (!reduceMotion) {
-    const hero = document.querySelector('.hero');
+    const ratio = height > 0 ? Math.min(1, Math.max(0, h.scrollTop / height)) : 0;
+    // Read geometry before writing styles to avoid forced synchronous layout.
+    let shift = null;
     if (hero) {
-      let ticking = false;
-      window.addEventListener('scroll', () => {
-        if (ticking) return;
-        ticking = true;
-        requestAnimationFrame(() => {
-          const rect = hero.getBoundingClientRect();
-          const progressInHero = Math.min(1, Math.max(0, -rect.top / (rect.height || 1)));
-          const shift = Math.min(40, progressInHero * 60);
-          hero.style.setProperty('--parallax-shift', shift.toFixed(1) + 'px');
-          ticking = false;
-        });
-      }, { passive: true });
+      const rect = hero.getBoundingClientRect();
+      const progressInHero = Math.min(1, Math.max(0, -rect.top / (rect.height || 1)));
+      shift = Math.min(40, progressInHero * 60).toFixed(1) + 'px';
     }
-  }
+    progress.style.transform = 'scaleX(' + ratio + ')';
+    if (hero && shift !== lastShift) {
+      hero.style.setProperty('--parallax-shift', shift);
+      lastShift = shift;
+    }
+  };
+  const scheduleScrollEffects = () => {
+    if (scrollFrame === null) scrollFrame = requestAnimationFrame(updateScrollEffects);
+  };
+  updateScrollEffects();
+  window.addEventListener('scroll', scheduleScrollEffects, { passive: true });
+  window.addEventListener('resize', scheduleScrollEffects, { passive: true });
+  window.addEventListener('load', scheduleScrollEffects, { once: true });
 })();
