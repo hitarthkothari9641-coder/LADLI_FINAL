@@ -12,6 +12,7 @@ const Admin = (() => {
       // token must always come fresh from the server (same-origin fetch).
       const res = await fetch('/api/admin/csrf-token', { credentials: 'same-origin', cache: 'no-store' });
       const data = await res.json();
+      if (!res.ok || !data.csrf_token) throw new Error("Unable to verify session");
       csrfToken = data.csrf_token;
       return csrfToken;
     } catch(e) {
@@ -31,9 +32,9 @@ const Admin = (() => {
     }
 
     const res = await fetch(path, {
+      ...options,
       headers,
       credentials: 'same-origin',
-      ...options,
     });
 
     if (res.status === 401) {
@@ -84,7 +85,7 @@ const Admin = (() => {
 
   function timeAgo(iso) {
     if (!iso) return '';
-    const then = new Date(iso + 'Z').getTime();
+    const then = new Date(/(?:Z|[+-]\d{2}:\d{2})$/.test(iso) ? iso : iso + 'Z').getTime();
     const diff = Math.max(0, Date.now() - then);
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return 'just now';

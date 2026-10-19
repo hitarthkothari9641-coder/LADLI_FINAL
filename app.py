@@ -8,6 +8,7 @@ import uuid
 import datetime
 import functools
 import hashlib
+import ipaddress
 import re
 import secrets as _secrets
 import time
@@ -86,6 +87,12 @@ if not _sec_key:
     _sec_key = os.urandom(32).hex()
 app.config["SECRET_KEY"] = _sec_key
 
+_default_hosts = "ladlilab.com,www.ladlilab.com,localhost,127.0.0.1"
+if os.environ.get("RENDER_EXTERNAL_HOSTNAME"):
+    _default_hosts += "," + os.environ["RENDER_EXTERNAL_HOSTNAME"]
+app.config["TRUSTED_HOSTS"] = [host.strip() for host in os.environ.get("ALLOWED_HOSTS", _default_hosts).split(",") if host.strip()]
+app.config["MAX_FORM_MEMORY_SIZE"] = 512 * 1024
+app.config["MAX_FORM_PARTS"] = 100
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -138,14 +145,31 @@ def ensure_db_ready():
             return True
         except Exception as init_err:
             _db_retry_at = time.monotonic() + 30
-            logger.error("Database initialisation failed: %s", init_err)
+            logger.error("Database initialisation failed (%s)", type(init_err).__name__)
             _log_db_hint(init_err)
             return False
+
+@app.before_request
+def _validate_json_body():
+    if request.path.startswith("/api/") and request.is_json:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"ok": False, "error": "Request body must be a JSON object."}), 400
+        for key in ("username", "password", "current_password", "new_password", "token", "name", "contact_name", "email", "phone", "company", "company_organisation", "message", "status", "mode"):
+            if key in body and not isinstance(body[key], str):
+                return jsonify({"ok": False, "error": "Invalid field type."}), 400
+
+@app.before_request
+def _recovery_policy():
+    if request.path in ("/api/admin/get-user-questions", "/api/admin/verify-security-answers", "/api/admin/reset-password-with-token") and not _env_flag("ALLOW_SECURITY_QUESTION_RECOVERY"):
+        return jsonify({"ok": False, "error": "Contact the site owner to arrange an administrator password reset."}), 403
 
 @app.before_request
 def _retry_db_init_if_needed():
     # Public HTML, assets and liveness must not depend on PostgreSQL.
     if request.path.startswith("/api/") or request.path == "/ready":
+        if app.config["SESSION_COOKIE_SECURE"] and len(os.environ.get("SECRET_KEY", "")) < 32:
+            return jsonify({"ok": False, "error": "Server security configuration is incomplete. Contact the site owner."}), 503
         if not ensure_db_ready():
             if request.path == "/ready":
                 return jsonify({"status": "error", "database": "unavailable", "schema": "uninitialised"}), 503
@@ -176,25 +200,29 @@ def _save_quote_attachment(file_storage):
     if not original_name.lower().endswith(".pdf"):
         raise ValueError("Attachment must be a PDF file.")
 
-    data = file_storage.read()
+    if file_storage.mimetype not in ("application/pdf", "application/octet-stream"):
+        raise ValueError("Attachment must be a PDF file.")
+    data = file_storage.read(MAX_ATTACHMENT_MB * 1024 * 1024 + 1)
     size_bytes = len(data)
     if size_bytes == 0:
         raise ValueError("Attached file appears to be empty.")
     if size_bytes > MAX_ATTACHMENT_MB * 1024 * 1024:
         raise ValueError(f"Attachment is larger than {MAX_ATTACHMENT_MB} MB. Please attach a smaller PDF.")
-    if not data.startswith(b"%PDF"):
+    if not data.startswith(b"%PDF-"):
         raise ValueError("That file doesn't look like a valid PDF.")
 
     safe_original_name = secure_filename(original_name) or "attachment.pdf"
-    
+
     s3 = _get_s3_client()
     if s3:
         s3_key = f"attachments/{uuid.uuid4().hex}.pdf"
         file_storage.seek(0)
-        s3.upload_fileobj(file_storage, S3_BUCKET, s3_key, ExtraArgs={"ContentType": "application/pdf"})
+        s3.upload_fileobj(file_storage, S3_BUCKET, s3_key, ExtraArgs={"ContentType": "application/pdf", "ServerSideEncryption": "AES256"})
         return s3_key, safe_original_name, size_bytes
     else:
-        # Local fallback
+        if app.config["SESSION_COOKIE_SECURE"] or os.environ.get("RENDER") or os.environ.get("VERCEL"):
+            raise RuntimeError("Durable attachment storage is unavailable.")
+        # Local development only
         stored_name = f"{uuid.uuid4().hex}.pdf"
         full_path = os.path.join(ATTACHMENT_DIR, stored_name)
         with open(full_path, "wb") as f:
@@ -206,42 +234,39 @@ def _save_quote_attachment(file_storage):
 # ---------------------------------------------------------------------------
 
 class RateLimiter:
-    def __init__(self):
-        self._buckets = {}
-        self._lock = threading.Lock()
-    
     def is_limited(self, key, max_requests, window_seconds):
-        now = time.time()
-        with self._lock:
-            if key not in self._buckets:
-                self._buckets[key] = []
-            # Clean old entries
-            self._buckets[key] = [t for t in self._buckets[key] if now - t < window_seconds]
-            if len(self._buckets[key]) >= max_requests:
-                return True
-            self._buckets[key].append(now)
-            return False
+        return not db.admit_request(key, max_requests, window_seconds)
 
 _rate_limiter = RateLimiter()
 
 def _client_ip():
-    trusted_count = int(os.environ.get("TRUSTED_PROXY_COUNT", "1"))
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        parts = [p.strip() for p in forwarded.split(",")]
-        idx = max(0, len(parts) - trusted_count)
-        return parts[idx]
-    return request.remote_addr or "unknown"
+    # Only an explicitly trusted immediate peer may supply a forwarding chain.
+    peer = request.remote_addr or "unknown"
+    try:
+        address = ipaddress.ip_address(peer)
+        networks = [ipaddress.ip_network(item.strip()) for item in
+                    os.environ.get("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128").split(",") if item.strip()]
+        count = int(os.environ.get("TRUSTED_PROXY_COUNT", "0"))
+        if count <= 0 or not any(address in network for network in networks):
+            return peer
+        parts = [part.strip() for part in request.headers.get("X-Forwarded-For", "").split(",")]
+        if len(parts) >= count:
+            return str(ipaddress.ip_address(parts[-count]))
+    except ValueError:
+        pass
+    return peer
 
 @app.after_request
 def set_security_headers(response):
+    if request.path.startswith(("/api/admin/", "/admin")):
+        response.headers["Cache-Control"] = "no-store"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if app.config["SESSION_COOKIE_SECURE"]:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-    
+
     if not response.headers.get("Content-Security-Policy"):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
@@ -251,6 +276,7 @@ def set_security_headers(response):
             "img-src 'self' data: https://*.google.com https://*.googleapis.com https://*.gstatic.com https://*.openstreetmap.org; "
             "frame-src 'self' https://www.google.com https://maps.google.com https://www.google.co.in https://www.openstreetmap.org; "
             "connect-src 'self'; "
+            "base-uri 'self'; object-src 'none'; form-action 'self'; "
             "frame-ancestors 'none'"
         )
     return response
@@ -259,13 +285,18 @@ def set_security_headers(response):
 def api_csrf_token():
     if not session.get("admin_user"):
         return jsonify({"error": "Not authenticated"}), 401
-    token = _secrets.token_urlsafe(32)
+    with db.get_db() as conn:
+        row = conn.execute("SELECT password_hash FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
+    if not row or session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
+        session.clear()
+        return jsonify({"error": "Session expired"}), 401
+    token = session.get("csrf_token") or _secrets.token_urlsafe(32)
     session["csrf_token"] = token
     return jsonify({"csrf_token": token})
 
 def _verify_csrf():
     token = request.headers.get("X-CSRF-Token") or request.form.get("_csrf_token")
-    if not token or token != session.get("csrf_token"):
+    if not token or not _secrets.compare_digest(token, session.get("csrf_token", "")):
         abort(403)
 
 def _password_fingerprint(password_hash):
@@ -283,31 +314,33 @@ def require_admin(view):
             return jsonify({"error": "Not authenticated"}), 401
 
         # Verify CSRF for state-changing operations
-        if request.method in ("POST", "PUT", "DELETE"):
-            if request.path not in ("/api/admin/login", "/api/admin/logout"):
-                _verify_csrf()
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            _verify_csrf()
 
         conn = db.get_db()
-        row = conn.execute(
-            "SELECT password_hash, must_change_password FROM admin_users WHERE username = %s",
-            (username,),
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT password_hash, must_change_password FROM admin_users WHERE username = %s",
+                (username,),
+            ).fetchone()
+            conn.close()
 
-        if not row:
-            session.clear()
-            return jsonify({"error": "Not authenticated"}), 401
+            if not row:
+                session.clear()
+                return jsonify({"error": "Not authenticated"}), 401
 
-        # If the password changed after this session was issued, the session
-        # fingerprint no longer matches: force re-login everywhere.
-        if session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
-            session.clear()
-            return jsonify({"error": "Session expired. Please log in again."}), 401
+            # If the password changed after this session was issued, the session
+            # fingerprint no longer matches: force re-login everywhere.
+            if session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
+                session.clear()
+                return jsonify({"error": "Session expired. Please log in again."}), 401
 
-        if request.path != "/api/admin/change-password":
-            if row["must_change_password"]:
-                return jsonify({"error": "Password change required.", "must_change_password": True}), 403
-        return view(*args, **kwargs)
+            if request.path not in ("/api/admin/change-password", "/api/admin/logout"):
+                if row["must_change_password"]:
+                    return jsonify({"error": "Password change required.", "must_change_password": True}), 403
+            return view(*args, **kwargs)
+        finally:
+            conn.close()
     return wrapped
 
 # Input Validation
@@ -329,7 +362,7 @@ def _validate_name(name):
 # Helpers
 # ---------------------------------------------------------------------------
 def now_iso():
-    return datetime.datetime.utcnow().isoformat()
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 def display_date(iso_str):
     try:
@@ -462,14 +495,17 @@ def api_contact():
         return jsonify({"ok": False, "error": "Invalid phone number."}), 400
 
     conn = db.get_db()
-    conn.execute(
-        "INSERT INTO inquiries (kind, name, company, phone, email, message, extra_json, status, created_at) "
-        "VALUES ('contact', %s, %s, %s, %s, %s, NULL, 'new', %s)",
-        (name, data.get("company", ""), phone, email, message, now_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return _respond_ok(data)
+    try:
+        conn.execute(
+            "INSERT INTO inquiries (kind, name, company, phone, email, message, extra_json, status, created_at) "
+            "VALUES ('contact', %s, %s, %s, %s, %s, NULL, 'new', %s)",
+            (name, data.get("company", ""), phone, email, message, now_iso()),
+        )
+        conn.commit()
+        conn.close()
+        return _respond_ok(data)
+    finally:
+        conn.close()
 
 @app.route("/api/quote", methods=["POST"])
 def api_quote():
@@ -503,7 +539,7 @@ def api_quote():
     attachment_size_bytes = None
     s3_object_key = None
     upload = request.files.get("attachment")
-    
+
     if upload and upload.filename:
         try:
             res, orig, size = _save_quote_attachment(upload)
@@ -515,22 +551,28 @@ def api_quote():
             attachment_size_bytes = size
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
+        except Exception:
+            logger.error("Quote attachment storage failed")
+            return jsonify({"ok": False, "error": "Attachment storage is temporarily unavailable. Please submit without an attachment or try again later."}), 503
 
     conn = db.get_db()
-    conn.execute(
-        "INSERT INTO inquiries "
-        "(kind, name, company, phone, email, message, extra_json, status, created_at, "
-        "attachment_filename, attachment_original_name, attachment_size_bytes, s3_object_key) "
-        "VALUES ('quote', %s, %s, %s, %s, %s, %s, 'new', %s, %s, %s, %s, %s)",
-        (
-            name, company, phone, email, data.get("message", ""),
-            json.dumps(extra, ensure_ascii=False), now_iso(),
-            attachment_filename, attachment_original_name, attachment_size_bytes, s3_object_key
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return _respond_ok(data)
+    try:
+        conn.execute(
+            "INSERT INTO inquiries "
+            "(kind, name, company, phone, email, message, extra_json, status, created_at, "
+            "attachment_filename, attachment_original_name, attachment_size_bytes, s3_object_key) "
+            "VALUES ('quote', %s, %s, %s, %s, %s, %s, 'new', %s, %s, %s, %s, %s)",
+            (
+                name, company, phone, email, data.get("message", ""),
+                json.dumps(extra, ensure_ascii=False), now_iso(),
+                attachment_filename, attachment_original_name, attachment_size_bytes, s3_object_key
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return _respond_ok(data)
+    finally:
+        conn.close()
 
 
 def _hash_visitor_id(raw_visitor_id):
@@ -606,43 +648,47 @@ def api_admin_login():
         }), 429
 
     conn = db.get_db()
-    row = conn.execute("SELECT * FROM admin_users WHERE username = %s", (username,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT * FROM admin_users WHERE username = %s", (username,)).fetchone()
+        conn.close()
 
-    if not row or not check_password_hash(row["password_hash"], password):
-        db.record_login_attempt(username, ip_address, success=False)
-        # Differentiate failures internally (logs) while returning one safe,
-        # generic public message that never confirms account existence.
-        if row:
-            changed_ago = db.find_password_in_history(username, password, row["password_hash"])
-            if changed_ago:
-                logger.warning(
-                    f"Failed login for '{username}' from {ip_address}: "
-                    f"used an old password (changed {changed_ago})"
-                )
+        if not row or not check_password_hash(row["password_hash"], password):
+            db.record_login_attempt(username, ip_address, success=False)
+            # Differentiate failures internally (logs) while returning one safe,
+            # generic public message that never confirms account existence.
+            if row:
+                changed_ago = db.find_password_in_history(username, password, row["password_hash"])
+                if changed_ago:
+                    logger.warning(
+                        f"Failed login for '{username}' from {ip_address}: "
+                        f"used an old password (changed {changed_ago})"
+                    )
+                else:
+                    logger.warning(f"Failed login for '{username}' from {ip_address}: wrong password")
             else:
-                logger.warning(f"Failed login for '{username}' from {ip_address}: wrong password")
-        else:
-            logger.warning(f"Failed login for unknown account from {ip_address}")
-        return jsonify({"ok": False, "error": "Invalid username or password."}), 401
+                logger.warning(f"Failed login for unknown account from {ip_address}")
+            return jsonify({"ok": False, "error": "Invalid username or password."}), 401
 
-    db.record_login_attempt(username, ip_address, success=True)
-    db.clear_login_attempts(username, ip_address)
+        db.record_login_attempt(username, ip_address, success=True)
+        db.clear_login_attempts(username, ip_address)
 
-    session.clear()
-    session["admin_user"] = username
-    session["pw_fp"] = _password_fingerprint(row["password_hash"])
-    session.permanent = True
-    logger.info(f"Successful login for username {username} from {ip_address}")
-    
-    return jsonify({
-        "ok": True,
-        "username": username,
-        "must_change_password": bool(row["must_change_password"]),
-        "security_setup_completed": bool(row.get("security_setup_completed", 0)),
-    })
+        session.clear()
+        session["admin_user"] = username
+        session["pw_fp"] = _password_fingerprint(row["password_hash"])
+        session.permanent = True
+        logger.info(f"Successful login for username {username} from {ip_address}")
+
+        return jsonify({
+            "ok": True,
+            "username": username,
+            "must_change_password": bool(row["must_change_password"]),
+            "security_setup_completed": bool(row.get("security_setup_completed", 0)),
+        })
+    finally:
+        conn.close()
 
 @app.route("/api/admin/logout", methods=["POST"])
+@require_admin
 def api_admin_logout():
     session.clear()
     return jsonify({"ok": True})
@@ -650,12 +696,11 @@ def api_admin_logout():
 @app.route("/api/admin/me")
 def api_admin_me():
     if session.get("admin_user"):
-        conn = db.get_db()
-        row = conn.execute(
-            "SELECT password_hash, must_change_password, security_setup_completed FROM admin_users WHERE username = %s",
-            (session["admin_user"],),
-        ).fetchone()
-        conn.close()
+        with db.get_db() as conn:
+            row = conn.execute(
+                "SELECT password_hash, must_change_password, security_setup_completed FROM admin_users WHERE username = %s",
+                (session["admin_user"],),
+            ).fetchone()
         if not row or session.get("pw_fp") != _password_fingerprint(row["password_hash"]):
             session.clear()
             return jsonify({"logged_in": False})
@@ -668,8 +713,15 @@ def api_admin_me():
     return jsonify({"logged_in": False})
 
 
+def _valid_security_answers(answers):
+    return (isinstance(answers, list) and len(answers) == 3 and
+            all(isinstance(a, dict) and type(a.get("question_id")) is int and
+                isinstance(a.get("answer"), str) and 2 <= len(a["answer"].strip()) <= 500 for a in answers) and
+            len({a["question_id"] for a in answers}) == 3 and
+            {a["question_id"] for a in answers} <= {q["id"] for q in db.get_security_questions()})
+
 def _password_is_strong(pwd):
-    return len(pwd.strip()) >= 8
+    return isinstance(pwd, str) and 12 <= len(pwd.strip()) <= 256
 
 @app.route("/api/admin/change-password", methods=["POST"])
 @require_admin
@@ -679,26 +731,32 @@ def api_admin_change_password():
     new_password = data.get("new_password") or ""
 
     if not _password_is_strong(new_password):
-        return jsonify({"ok": False, "error": "New password must be at least 8 characters."}), 400
+        return jsonify({"ok": False, "error": "New password must be between 12 and 256 characters."}), 400
 
     conn = db.get_db()
-    row = conn.execute(
-        "SELECT * FROM admin_users WHERE username = %s", (session["admin_user"],)
-    ).fetchone()
-    
-    if not row or not check_password_hash(row["password_hash"], current):
-        conn.close()
-        return jsonify({"ok": False, "error": "Current password is incorrect."}), 400
+    try:
+        row = conn.execute(
+            "SELECT * FROM admin_users WHERE username = %s", (session["admin_user"],)
+        ).fetchone()
 
-    if check_password_hash(row["password_hash"], new_password):
-        conn.close()
-        return jsonify({"ok": False, "error": "New password must be different from the current one."}), 400
+        if not row or not check_password_hash(row["password_hash"], current):
+            conn.close()
+            return jsonify({"ok": False, "error": "Current password is incorrect."}), 400
 
-    conn.close()
-    db.set_password(session["admin_user"], new_password)
-    logger.info(f"Password changed for user {session['admin_user']}")
-    session.clear()
-    return jsonify({"ok": True})
+        if check_password_hash(row["password_hash"], new_password):
+            conn.close()
+            return jsonify({"ok": False, "error": "New password must be different from the current one."}), 400
+
+        conn.close()
+        try:
+            db.set_password(session["admin_user"], new_password, expected_hash=row["password_hash"])
+        except ValueError as error:
+            return jsonify({"ok": False, "error": str(error)}), 400
+        logger.info(f"Password changed for user {session['admin_user']}")
+        session.clear()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Security Questions & Recovery API
@@ -710,20 +768,29 @@ def api_security_questions():
     questions = db.get_security_questions()
     return jsonify([{"id": q["id"], "question": q["question"]} for q in questions])
 
+@app.route("/api/admin/my-security-questions")
+@require_admin
+def api_my_security_questions():
+    admin = db.find_admin_by_username_or_email(session["admin_user"])
+    return jsonify({"questions": db.get_user_security_questions(admin["id"])})
+
 @app.route("/api/admin/security-setup-status")
 @require_admin
 def api_security_setup_status():
     conn = db.get_db()
-    row = conn.execute("SELECT id, security_setup_completed FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
-    conn.close()
-    return jsonify({"completed": bool(row["security_setup_completed"]) if row else False})
+    try:
+        row = conn.execute("SELECT id, security_setup_completed FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
+        conn.close()
+        return jsonify({"completed": bool(row["security_setup_completed"]) if row else False})
+    finally:
+        conn.close()
 
 @app.route("/api/admin/setup-security-questions", methods=["POST"])
 @require_admin
 def api_setup_security_questions():
     data = request.get_json(silent=True) or {}
     answers = data.get("answers", [])
-    if len(answers) != 3:
+    if not _valid_security_answers(answers):
         return jsonify({"ok": False, "error": "Exactly 3 questions required."}), 400
     question_ids = [a["question_id"] for a in answers]
     if len(set(question_ids)) != 3:
@@ -731,22 +798,25 @@ def api_setup_security_questions():
     for a in answers:
         if not a.get("answer") or len(a["answer"].strip()) < 2:
             return jsonify({"ok": False, "error": "All answers must be at least 2 characters."}), 400
-    
+
     conn = db.get_db()
-    row = conn.execute("SELECT id, security_setup_completed FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
-    conn.close()
-    if not row:
-        return jsonify({"ok": False, "error": "Account not found."}), 404
-    if row["security_setup_completed"]:
-        return jsonify({"ok": False, "error": "Security questions already configured. Use the change flow."}), 400
-    
-    hashed_answers = []
-    for a in answers:
-        normalized = db.normalize_answer(a["answer"])
-        hashed_answers.append({"question_id": a["question_id"], "answer_hash": generate_password_hash(normalized)})
-    db.save_security_answers(row["id"], hashed_answers)
-    logger.info(f"Security questions configured for user {session['admin_user']}")
-    return jsonify({"ok": True})
+    try:
+        row = conn.execute("SELECT id, security_setup_completed FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"ok": False, "error": "Account not found."}), 404
+        if row["security_setup_completed"]:
+            return jsonify({"ok": False, "error": "Security questions already configured. Use the change flow."}), 400
+
+        hashed_answers = []
+        for a in answers:
+            normalized = db.normalize_answer(a["answer"])
+            hashed_answers.append({"question_id": a["question_id"], "answer_hash": generate_password_hash(normalized)})
+        db.save_security_answers(row["id"], hashed_answers)
+        logger.info(f"Security questions configured for user {session['admin_user']}")
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 @app.route("/api/admin/change-security-questions", methods=["POST"])
 @require_admin
@@ -755,35 +825,32 @@ def api_change_security_questions():
     current_password = data.get("current_password", "")
     current_answers = data.get("current_answers", [])
     new_answers = data.get("new_answers", [])
-    
+
     conn = db.get_db()
-    row = conn.execute("SELECT * FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
-    conn.close()
-    if not row or not check_password_hash(row["password_hash"], current_password):
-        return jsonify({"ok": False, "error": "Current password is incorrect."}), 400
-    
-    if not db.verify_security_answers(row["id"], current_answers):
-        return jsonify({"ok": False, "error": "Current security answers are incorrect."}), 400
-    
-    if len(new_answers) != 3:
-        return jsonify({"ok": False, "error": "Exactly 3 questions required."}), 400
-    new_qids = [a["question_id"] for a in new_answers]
-    if len(set(new_qids)) != 3:
-        return jsonify({"ok": False, "error": "All questions must be different."}), 400
-    
-    hashed_answers = []
-    for a in new_answers:
-        normalized = db.normalize_answer(a["answer"])
-        hashed_answers.append({"question_id": a["question_id"], "answer_hash": generate_password_hash(normalized)})
-    
-    conn = db.get_db()
-    conn.execute("DELETE FROM admin_security_answers WHERE admin_user_id = %s", (row["id"],))
-    conn.commit()
-    conn.close()
-    
-    db.save_security_answers(row["id"], hashed_answers)
-    logger.info(f"Security questions changed for user {session['admin_user']}")
-    return jsonify({"ok": True})
+    try:
+        row = conn.execute("SELECT * FROM admin_users WHERE username = %s", (session["admin_user"],)).fetchone()
+        conn.close()
+        if not row or not check_password_hash(row["password_hash"], current_password):
+            return jsonify({"ok": False, "error": "Current password is incorrect."}), 400
+
+        # Reauthentication with the current password authorizes replacement.
+
+        if not _valid_security_answers(new_answers):
+            return jsonify({"ok": False, "error": "Exactly 3 questions required."}), 400
+        new_qids = [a["question_id"] for a in new_answers]
+        if len(set(new_qids)) != 3:
+            return jsonify({"ok": False, "error": "All questions must be different."}), 400
+
+        hashed_answers = []
+        for a in new_answers:
+            normalized = db.normalize_answer(a["answer"])
+            hashed_answers.append({"question_id": a["question_id"], "answer_hash": generate_password_hash(normalized)})
+
+        db.save_security_answers(row["id"], hashed_answers)
+        logger.info(f"Security questions changed for user {session['admin_user']}")
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 @app.route("/api/admin/get-user-questions", methods=["POST"])
 def api_get_user_questions():
@@ -794,18 +861,18 @@ def api_get_user_questions():
 
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
-    
+
     if db.is_recovery_locked_out(username or "__empty__", ip):
         return jsonify({"ok": False, "error": "Too many attempts. Please try again later."}), 429
-    
+
     if not username:
         return jsonify({"ok": False, "error": "If that account exists, security questions will be shown."}), 400
-    
+
     admin = db.find_admin_by_username_or_email(username)
     if not admin or not admin.get("security_setup_completed"):
         fake_qs = db.get_security_questions()[:3]
         return jsonify({"ok": True, "questions": [{"question_id": q["id"], "question": q["question"]} for q in fake_qs]})
-    
+
     questions = db.get_user_security_questions(admin["id"])
     return jsonify({"ok": True, "questions": questions})
 
@@ -815,28 +882,28 @@ def api_verify_security_answers():
     ip = _client_ip()
     if _rate_limiter.is_limited(f"recovery_verify:{ip}", max_requests=5, window_seconds=1800):
         abort(429)
-        
+
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
     answers = data.get("answers", [])
-    
+
     if db.is_recovery_locked_out(username or "__empty__", ip):
         return jsonify({"ok": False, "error": "Too many attempts. Please try again later."}), 429
-    
+
     generic_error = "Verification failed. Please check your answers and try again."
-    
+
     admin = db.find_admin_by_username_or_email(username)
     if not admin:
         db.record_recovery_attempt(username or "__unknown__", ip, False)
         return jsonify({"ok": False, "error": generic_error}), 400
-    
+
     if not db.verify_security_answers(admin["id"], answers):
         db.record_recovery_attempt(username, ip, False)
         logger.warning(f"Failed recovery attempt for '{username}' from {ip}")
         return jsonify({"ok": False, "error": generic_error}), 400
-    
+
     db.record_recovery_attempt(username, ip, True)
-    token = db.create_reset_token(username)
+    token = db.create_reset_token(admin["username"])
     logger.info(f"Password reset token issued for '{username}' from {ip}")
     return jsonify({"ok": True, "reset_token": token})
 
@@ -846,22 +913,23 @@ def api_reset_password_with_token():
     ip = _client_ip()
     if _rate_limiter.is_limited(f"reset_token:{ip}", max_requests=5, window_seconds=1800):
         abort(429)
-        
+
     data = request.get_json(silent=True) or {}
     token = data.get("token", "")
     new_password = data.get("new_password", "")
-    
+
     if not _password_is_strong(new_password):
-        return jsonify({"ok": False, "error": "Password must be at least 8 characters."}), 400
-    
-    username = db.validate_reset_token(token)
+        return jsonify({"ok": False, "error": "Password must be between 12 and 256 characters."}), 400
+
+    try:
+        username = db.reset_password_with_token(token, new_password)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
     if not username:
         return jsonify({"ok": False, "error": "Invalid or expired reset token."}), 400
-    
-    db.set_password(username, new_password)
-    db.invalidate_reset_token(token)
-    db.cleanup_expired_tokens()
-    
+
+    session.clear()
+
     logger.info(f"Password reset completed for '{username}'")
     return jsonify({"ok": True})
 
@@ -885,34 +953,37 @@ def api_admin_inquiries():
     query += " ORDER BY created_at DESC"
 
     conn = db.get_db()
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
 
-    out = []
-    for r in rows:
-        extra = {}
-        if r["extra_json"]:
-            try:
-                extra = json.loads(r["extra_json"])
-            except Exception:
-                extra = {}
-        out.append({
-            "id": r["id"],
-            "kind": r["kind"],
-            "name": r["name"],
-            "company": r["company"],
-            "phone": r["phone"],
-            "email": r["email"],
-            "message": r["message"],
-            "extra": extra,
-            "status": r["status"],
-            "created_at": r["created_at"],
-            "created_at_display": display_date(r["created_at"]),
-            "has_attachment": bool(r["attachment_filename"] or r.get("s3_object_key")),
-            "attachment_original_name": r["attachment_original_name"],
-            "attachment_size_bytes": r["attachment_size_bytes"],
-        })
-    return jsonify(out)
+        out = []
+        for r in rows:
+            extra = {}
+            if r["extra_json"]:
+                try:
+                    extra = json.loads(r["extra_json"])
+                except Exception:
+                    extra = {}
+            out.append({
+                "id": r["id"],
+                "kind": r["kind"],
+                "name": r["name"],
+                "company": r["company"],
+                "phone": r["phone"],
+                "email": r["email"],
+                "message": r["message"],
+                "extra": extra,
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "created_at_display": display_date(r["created_at"]),
+                "has_attachment": bool(r["attachment_filename"] or r.get("s3_object_key")),
+                "attachment_original_name": r["attachment_original_name"],
+                "attachment_size_bytes": r["attachment_size_bytes"],
+            })
+        return jsonify(out)
+    finally:
+        conn.close()
 
 @app.route("/api/admin/inquiries/<int:inquiry_id>/status", methods=["POST"])
 @require_admin
@@ -923,62 +994,74 @@ def api_admin_update_status(inquiry_id):
         return jsonify({"ok": False, "error": "Invalid status."}), 400
 
     conn = db.get_db()
-    cur = conn.execute("UPDATE inquiries SET status = %s WHERE id = %s", (status, inquiry_id))
-    conn.commit()
-    updated = cur.rowcount
-    conn.close()
-    if not updated:
-        return jsonify({"ok": False, "error": "Inquiry not found."}), 404
-    return jsonify({"ok": True})
+    try:
+        cur = conn.execute("UPDATE inquiries SET status = %s WHERE id = %s", (status, inquiry_id))
+        conn.commit()
+        updated = cur.rowcount
+        conn.close()
+        if not updated:
+            return jsonify({"ok": False, "error": "Inquiry not found."}), 404
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 @app.route("/api/admin/inquiries/<int:inquiry_id>/attachment")
 @require_admin
 def api_admin_inquiry_attachment(inquiry_id):
     conn = db.get_db()
-    row = conn.execute("SELECT * FROM inquiries WHERE id = %s", (inquiry_id,)).fetchone()
-    conn.close()
-    
-    if not row or not (row["attachment_filename"] or row.get("s3_object_key")):
-        abort(404)
-        
-    download_name = row["attachment_original_name"] or row["attachment_filename"] or "attachment.pdf"
-    
-    if row.get("s3_object_key"):
-        s3 = _get_s3_client()
-        if s3:
-            url = s3.generate_presigned_url("get_object", Params={"Bucket": S3_BUCKET, "Key": row["s3_object_key"]}, ExpiresIn=300)
-            return redirect(url)
-            
-    return send_from_directory(
-        ATTACHMENT_DIR, row["attachment_filename"], as_attachment=True, download_name=download_name
-    )
+    try:
+        row = conn.execute("SELECT * FROM inquiries WHERE id = %s", (inquiry_id,)).fetchone()
+        conn.close()
+
+        if not row or not (row["attachment_filename"] or row.get("s3_object_key")):
+            abort(404)
+
+        download_name = row["attachment_original_name"] or row["attachment_filename"] or "attachment.pdf"
+
+        if row.get("s3_object_key"):
+            s3 = _get_s3_client()
+            if s3:
+                url = s3.generate_presigned_url("get_object", Params={"Bucket": S3_BUCKET, "Key": row["s3_object_key"], "ResponseContentDisposition": "attachment"}, ExpiresIn=300)
+                return redirect(url)
+            return jsonify({"ok": False, "error": "Attachment storage temporarily unavailable."}), 503
+
+        return send_from_directory(
+            ATTACHMENT_DIR, row["attachment_filename"], as_attachment=True, download_name=download_name
+        )
+    finally:
+        conn.close()
 
 @app.route("/api/admin/inquiries/<int:inquiry_id>", methods=["DELETE"])
 @require_admin
 def api_admin_delete_inquiry(inquiry_id):
     conn = db.get_db()
-    row = conn.execute("SELECT * FROM inquiries WHERE id = %s", (inquiry_id,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "Inquiry not found."}), 404
-        
-    if row.get("s3_object_key"):
-        s3 = _get_s3_client()
-        if s3:
+    try:
+        row = conn.execute("SELECT * FROM inquiries WHERE id = %s", (inquiry_id,)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"ok": False, "error": "Inquiry not found."}), 404
+
+        if row.get("s3_object_key"):
+            s3 = _get_s3_client()
+            if not s3:
+                return jsonify({"ok": False, "error": "Attachment storage unavailable; enquiry retained."}), 503
             try:
                 s3.delete_object(Bucket=S3_BUCKET, Key=row["s3_object_key"])
-            except Exception as e:
-                logger.error(f"Failed to delete S3 object: {e}")
-                
-    if row["attachment_filename"]:
-        file_path = os.path.join(ATTACHMENT_DIR, row["attachment_filename"])
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-            
-    conn.execute("DELETE FROM inquiries WHERE id = %s", (inquiry_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True})
+            except Exception:
+                logger.error("Attachment deletion failed; enquiry retained")
+                return jsonify({"ok": False, "error": "Attachment deletion failed; enquiry retained."}), 503
+
+        if row["attachment_filename"]:
+            file_path = os.path.join(ATTACHMENT_DIR, row["attachment_filename"])
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+        conn.execute("DELETE FROM inquiries WHERE id = %s", (inquiry_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Visitors API
@@ -1055,13 +1138,14 @@ def admin_visitors_page():
 def admin_forgot_password():
     if session.get("admin_user"):
         return redirect("/admin")
-    return send_from_directory(ADMIN_DIR, "forgot_password.html")
+    page = "forgot_password.html" if _env_flag("ALLOW_SECURITY_QUESTION_RECOVERY") else "owner_recovery.html"
+    return send_from_directory(ADMIN_DIR, page)
 
 @app.route("/admin/setup-security")
 def admin_security_setup_page():
     if not session.get("admin_user"):
         return redirect("/admin/login")
-    return send_from_directory(ADMIN_DIR, "setup_security.html")
+    return redirect("/admin/settings")
 
 @app.route("/admin/assets/<path:filename>")
 def admin_assets(filename):

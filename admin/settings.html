@@ -83,7 +83,7 @@
           <div class="field">
             <label for="new-password">New password</label>
             <div class="password-field">
-              <input id="new-password" name="new_password" type="password" required minlength="8" autocomplete="new-password">
+              <input id="new-password" name="new_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
               <button type="button" class="password-toggle" aria-label="Show password">
                 <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                 <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a20.3 20.3 0 0 1 5.06-6.06M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a20.3 20.3 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
@@ -93,14 +93,14 @@
           <div class="field">
             <label for="confirm-password">Confirm new password</label>
             <div class="password-field">
-              <input id="confirm-password" name="confirm_password" type="password" required minlength="8" autocomplete="new-password">
+              <input id="confirm-password" name="confirm_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password">
               <button type="button" class="password-toggle" aria-label="Show password">
                 <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                 <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a20.3 20.3 0 0 1 5.06-6.06M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a20.3 20.3 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
               </button>
             </div>
           </div>
-          <p class="sub" style="margin:-8px 0 14px">At least 8 characters.</p>
+          <p class="sub" style="margin:-8px 0 14px">12–256 characters.</p>
           <button class="btn btn-primary btn-block" type="submit" id="pw-btn">Update Password</button>
         </form>
       </div>
@@ -108,7 +108,7 @@
       <!-- Security Questions Panel -->
       <div class="panel" style="padding:26px 24px">
         <h3>Security Questions</h3>
-        <p class="sub" style="margin: 0 0 16px;">Used to recover your account if you forget your password.</p>
+        <p class="sub" style="margin: 0 0 16px;">Legacy recovery questions. Password recovery is handled by the site owner unless legacy recovery is explicitly enabled.</p>
         
         <div id="current-questions" style="margin-bottom: 20px;">
           <!-- JS will populate -->
@@ -181,15 +181,12 @@ async function boot() {
 
 async function loadCurrentQuestions(username) {
   try {
-    const res = await Admin.api('/api/admin/get-user-questions', {
-      method: 'POST',
-      body: JSON.stringify({ username })
-    });
+    const res = await Admin.api('/api/admin/my-security-questions');
     const container = document.getElementById('current-questions');
     if (res.questions && res.questions.length > 0) {
       container.innerHTML = res.questions.map((q, i) => `
         <div style="margin-bottom: 10px;">
-          <strong>Q${i+1}:</strong> ${Admin.escapeHtml(q)}<br>
+          <strong>Q${i+1}:</strong> ${Admin.escapeHtml(q.question)}<br>
           <span style="color: var(--ink-60);">A: ••••••••••</span>
         </div>
       `).join('');
@@ -205,7 +202,7 @@ async function loadAllQuestionsForChange() {
   if (allQuestions.length > 0) return;
   try {
     const res = await Admin.api('/api/admin/security-questions');
-    allQuestions = res.questions;
+    allQuestions = res;
     const container = document.getElementById('new-sq-fields');
     let html = '';
     for (let i = 0; i < 3; i++) {
@@ -214,7 +211,7 @@ async function loadAllQuestionsForChange() {
           <label for="new_q${i}">New Question ${i + 1}</label>
           <select id="new_q${i}" class="new-q-select" required>
             <option value="">-- Select a question --</option>
-            ${allQuestions.map(q => `<option value="${Admin.escapeHtml(q)}">${Admin.escapeHtml(q)}</option>`).join('')}
+            ${allQuestions.map(q => `<option value="${q.id}">${Admin.escapeHtml(q.question)}</option>`).join('')}
           </select>
         </div>
         <div class="field">
@@ -255,7 +252,8 @@ async function onPasswordSubmit(e) {
       method: 'POST',
       body: JSON.stringify({ current_password: current, new_password: next }),
     });
-    successEl.textContent = 'Password updated successfully.';
+    successEl.textContent = 'Password updated. Please sign in again.';
+    setTimeout(() => { window.location.href = '/admin/login'; }, 1200);
     successEl.classList.add('is-visible');
     document.getElementById('pw-form').reset();
     document.querySelectorAll('#pw-form .password-field').forEach((wrapper) => {
@@ -308,14 +306,10 @@ async function onSecurityQuestionsSubmit(e) {
   btn.innerHTML = '<span class="spinner"></span>';
 
   try {
-    // Actually we don't have a specific endpoint for changing with password,
-    // assuming setup-security-questions works if we just hit it again, or we need to pass current password?
-    // Wait, the prompt says "requires current password". The backend needs to verify it.
-    // If backend doesn't support changing SQ with password, we might need a custom endpoint or maybe we can re-login implicitly.
-    // Let's assume POST /api/admin/change-security-questions or just POST /api/admin/setup-security-questions accepts `current_password`.
-    await Admin.api('/api/admin/setup-security-questions', {
+    await Admin.api('/api/admin/change-security-questions', {
       method: 'POST',
-      body: JSON.stringify({ current_password: currentPassword, questions, answers })
+      body: JSON.stringify({ current_password: currentPassword,
+        new_answers: questions.map((id, i) => ({ question_id: Number(id), answer: answers[i] })) })
     });
     
     successEl.textContent = 'Security questions updated successfully.';
