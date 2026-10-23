@@ -2350,8 +2350,8 @@ body > .site-footer {
   }
 }
 
-/* Navigation collapses before desktop links and phone can collide. */
-@media (max-width: 1500px) {
+/* Keep laptop navigation visible; use the drawer only on narrow viewports. */
+@media (max-width: 900px) {
   .menu-toggle {
     display: flex;
   }
@@ -2526,8 +2526,8 @@ body > .site-footer {
 
 }
 
-/* Preserve the existing tablet page layout breakpoint. */
-@media (max-width: 1024px) {
+/* Stack tablet content at the same narrow-viewport threshold as the drawer. */
+@media (max-width: 900px) {
   .hero {
     padding: 48px 0 60px;
   }
@@ -3222,7 +3222,7 @@ a[href^="mailto:"], a[href^="tel:"] {
   .header-right > :not(.menu-toggle) { display: none; }
 }
 /* Laptop */
-@media (max-width: 1500px) {
+@media (max-width: 900px) {
   .nav > a { padding: 8px 12px; font-size: 15px; }
 }
 /* Laptop - Large */
@@ -3251,7 +3251,7 @@ body.menu-open .site-header {
   z-index: 1003 !important;
 }
 
-@media (max-width: 1500px) {
+@media (max-width: 900px) {
   .nav {
     width: min(85vw, 360px);
     padding-top: 96px;
@@ -3288,8 +3288,8 @@ body.menu-open .site-header {
    ---------------------------------------------------------
    Breakpoint contract (requested):
      Mobile  <= 767px   -> single column, drawer nav, sticky bar
-     Tablet   768-1023  -> dedicated tablet layout, no mobile bar
-     Desktop >= 1024px  -> existing desktop design untouched
+     Tablet   768-900   -> dedicated tablet layout, no mobile bar
+     Desktop >= 901px   -> desktop layout with compact laptop navigation
    This block is append-only and additive. Every rule here
    either restores the intended responsive cascade or hardens
    against regressions; nothing removes or rewrites the
@@ -3323,7 +3323,7 @@ body {
                                 "X" stays visible/clickable above both
       The 100vh fallback keeps the panel full-height on older mobile
       browsers that do not support 100dvh. */
-@media (max-width: 1500px) {
+@media (max-width: 900px) {
   .nav {
     z-index: 9900 !important;
     width: min(85vw, 360px);
@@ -3425,9 +3425,9 @@ body {
   }
 }
 
-/* 5. TABLET 768px-1023px — dedicated layout (not compressed desktop,
+/* 5. TABLET 768px-900px — dedicated layout (not compressed desktop,
       not mobile). The mobile sticky bar belongs to phones only. */
-@media (min-width: 768px) and (max-width: 1023px) {
+@media (min-width: 768px) and (max-width: 900px) {
   .mobile-action-bar {
     display: none !important;
   }
@@ -3471,11 +3471,22 @@ body {
 }
 
 /* Give desktop navigation its intrinsic width instead of a 1:2:1 split. */
-@media (min-width: 1501px) {
+@media (min-width: 901px) {
   .nav-wrap { gap: 24px; }
   .header-left, .header-right { flex: 0 0 auto; }
   .header-center { flex: 1 1 auto; min-width: max-content; }
 }
-@media (max-width: 1500px) {
+/* Retain desktop links on laptops without crowding the quote button. */
+@media (min-width: 901px) and (max-width: 1500px) {
+  .header-right .phone-link { display: none; }
+}
+@media (min-width: 901px) and (max-width: 1120px) {
+  .nav-wrap { gap: 12px; padding-inline: 16px; }
+  .brand img { width: 128px; }
+  .nav { gap: 6px; }
+  .nav > a, .nav-item > a { font-size: 13px; padding-inline: 2px; }
+  .header-right .btn-small { padding: 8px 12px; }
+}
+@media (max-width: 900px) {
   .menu-toggle { z-index: 10000; flex-shrink: 0; }
 }
