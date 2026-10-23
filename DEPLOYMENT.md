@@ -1,4 +1,6 @@
-# LADLI — Production Deployment (AWS)
+# LADLI — Alternative AWS Deployment
+
+Render is the primary target. Read [RENDER_OPERATIONS.md](RENDER_OPERATIONS.md) for the current recovery, storage, migration and release policy. This file describes the alternative AWS topology only.
 
 Production stack:
 
@@ -17,9 +19,12 @@ Flask (app.py)
    └── AWS Secrets Manager  (SECRET_KEY, DB credentials)
 ```
 
-There is **no SMTP dependency**: password recovery uses personal
-security questions only. No mail server, mail credentials, mail-outbox
-or email reset tokens exist anywhere in this application.
+There is **no SMTP dependency**. Recovery defaults to an owner-controlled reset
+using `python manage.py reset-admin --username admin` after identity verification.
+The legacy question-based flow requires `ALLOW_SECURITY_QUESTION_RECOVERY=true`;
+it issues hashed, 15-minute, single-use reset tokens. The token schema is retained
+for compatibility. Tokens and password changes are committed atomically.
+Do not enable the legacy flow as a substitute for verified recovery or MFA.
 
 ---
 

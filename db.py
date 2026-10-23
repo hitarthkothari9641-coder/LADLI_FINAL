@@ -24,7 +24,7 @@ import datetime
 import uuid
 import hashlib
 import threading
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote, parse_qs
 from werkzeug.security import generate_password_hash, check_password_hash
 
 try:
@@ -77,11 +77,11 @@ def get_pg_connection_params():
         parsed = urlparse(url)
         return {
             "dbname": parsed.path.lstrip("/"),
-            "user": parsed.username,
-            "password": parsed.password,
+            "user": unquote(parsed.username or ""),
+            "password": unquote(parsed.password or ""),
             "host": parsed.hostname,
             "port": parsed.port or 5432,
-            "sslmode": PGSSLMODE if parsed.hostname not in ("localhost", "127.0.0.1") else "prefer",
+            "sslmode": parse_qs(parsed.query).get("sslmode", [PGSSLMODE])[0],
             "connect_timeout": int(os.environ.get("PGCONNECT_TIMEOUT", "5")),
         }
     return {
@@ -102,7 +102,7 @@ def _get_pg_pool():
     with _pg_pool_lock:
         if _pg_pool is None and PG_DRIVER == "psycopg2" and is_postgres_configured():
             params = get_pg_connection_params()
-            _pg_pool = pool.ThreadedConnectionPool(1, 20, **params)
+            _pg_pool = pool.ThreadedConnectionPool(1, int(os.environ.get("DB_POOL_MAX", "5")), **params)
     return _pg_pool
 
 # ---------------------------------------------------------------------------
@@ -120,10 +120,10 @@ class PostgresCursorWrapper:
         formatted_sql = sql
         if "?" in formatted_sql and "%s" not in formatted_sql:
             formatted_sql = formatted_sql.replace("?", "%s")
-        
+
         # We don't need SQLite translations anymore, but kept for compatibility just in case
         formatted_sql = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)", r"INSERT INTO \1", formatted_sql, flags=re.IGNORECASE)
-        
+
         if params is not None:
             if isinstance(params, (list, tuple)):
                 self._cursor.execute(formatted_sql, params)
@@ -165,6 +165,7 @@ class PostgresConnectionWrapper:
         self._conn = raw_conn
         self._from_pool = from_pool
         self._closed = False
+        self._cursors = []
 
     def execute(self, sql, params=None):
         if PG_DRIVER == "psycopg2":
@@ -173,6 +174,7 @@ class PostgresConnectionWrapper:
             cursor = self._conn.cursor(row_factory=dict_row)
         else:  # pg8000 — plain cursor; wrapper converts rows to dicts
             cursor = self._conn.cursor()
+        self._cursors.append(cursor)
         wrapper = PostgresCursorWrapper(cursor, self)
         wrapper.execute(sql, params)
         return wrapper
@@ -188,11 +190,9 @@ class PostgresConnectionWrapper:
                         cursor.execute(statement)
             finally:
                 cursor.close()
-            self._conn.commit()
             return
         with self._conn.cursor() as cur:
             cur.execute(script)
-        self._conn.commit()
 
     def commit(self):
         if not self._closed:
@@ -205,20 +205,28 @@ class PostgresConnectionWrapper:
     def close(self):
         if not self._closed:
             self._closed = True
-            if self._from_pool and _pg_pool is not None:
-                _pg_pool.putconn(self._conn)
-            else:
-                self._conn.close()
+            broken = False
+            try:
+                self._conn.rollback()
+                for cursor in self._cursors:
+                    cursor.close()
+            except Exception:
+                broken = True
+            finally:
+                if self._from_pool and _pg_pool is not None:
+                    _pg_pool.putconn(self._conn, close=broken)
+                else:
+                    self._conn.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is not None:
-            self.rollback()
-        else:
-            self.commit()
-        self.close()
+        try:
+            if exc_type is None:
+                self.commit()
+        finally:
+            self.close()
 
 def _pg8000_connect(params):
     """Opens a pg8000 connection, translating libpq-style params."""
@@ -241,6 +249,17 @@ def _pg8000_connect(params):
         kwargs["ssl_context"] = True
     return pg8000_dbapi.connect(**kwargs)
 
+def _configure_connection(conn):
+    try:
+        conn.execute("SELECT set_config('statement_timeout', %s, false)", (os.environ.get("DB_STATEMENT_TIMEOUT_MS", "15000"),))
+        conn.execute("SELECT set_config('lock_timeout', %s, false)", (os.environ.get("DB_LOCK_TIMEOUT_MS", "5000"),))
+        conn.execute("SET TIME ZONE 'UTC'")
+        conn.commit()
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
 def get_db():
     """
     Returns an active database connection wrapper.
@@ -252,7 +271,7 @@ def get_db():
             pool_instance = _get_pg_pool()
             if pool_instance:
                 conn = pool_instance.getconn()
-                return PostgresConnectionWrapper(conn, from_pool=True)
+                return _configure_connection(PostgresConnectionWrapper(conn, from_pool=True))
             params = get_pg_connection_params()
             if PG_DRIVER == "psycopg2":
                 conn = psycopg2.connect(**params)
@@ -260,9 +279,9 @@ def get_db():
                 conn = psycopg.connect(**params)
             else:
                 conn = _pg8000_connect(params)
-            return PostgresConnectionWrapper(conn, from_pool=False)
+            return _configure_connection(PostgresConnectionWrapper(conn, from_pool=False))
         except Exception as e:
-            raise RuntimeError(f"Could not connect to PostgreSQL database: {e}")
+            raise RuntimeError("Could not connect to PostgreSQL database") from None
 
     raise RuntimeError(
         "No PostgreSQL driver is available or the database is not configured. "
@@ -378,16 +397,16 @@ def seed_security_questions(conn):
         conn.execute("INSERT INTO security_questions (question) VALUES (%s) ON CONFLICT (question) DO NOTHING", (q,))
 
 def _migrate(conn):
-    """Ensures default visitor_stats record exists and runs migrations."""
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO visitor_stats (id, manual_count, mode, updated_at) "
-        "VALUES (1, 0, 'auto', %s) ON CONFLICT (id) DO NOTHING",
-        (now,),
-    )
+    """Apply numbered, additive migrations under init_db's transaction lock."""
+    from pathlib import Path
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+    for migration in sorted((Path(BASE_DIR) / "migrations").glob("[0-9]*.sql")):
+        if not conn.execute("SELECT version FROM schema_migrations WHERE version = %s", (migration.stem,)).fetchone():
+            conn.executescript(migration.read_text(encoding="utf-8"))
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (migration.stem,))
+    conn.execute("INSERT INTO visitor_stats (id, manual_count, mode, updated_at) VALUES (1, 0, 'auto', %s) ON CONFLICT (id) DO NOTHING", (datetime.datetime.now(datetime.timezone.utc).isoformat(),))
     conn.execute("UPDATE visitor_stats SET mode = 'auto' WHERE mode = 'real'")
     seed_security_questions(conn)
-    conn.commit()
 
 def generate_strong_password(length=16):
     """Generates a cryptographically strong random password."""
@@ -403,43 +422,19 @@ def generate_strong_password(length=16):
             return pwd
 
 def init_db(default_username="admin", default_password=None, default_email=None):
-    """Initializes the database schema and creates initial admin if missing."""
-    conn = get_db()
-    conn.executescript(POSTGRES_SCHEMA)
-
-    _migrate(conn)
-
-    existing_row = conn.execute("SELECT COUNT(*) AS c FROM admin_users").fetchone()
-    existing = existing_row["c"] if existing_row else 0
-    if existing == 0:
-        generated = default_password is None
-        password = default_password or generate_strong_password()
-        now = datetime.datetime.utcnow().isoformat()
-        password_hash = generate_password_hash(password)
-
-        conn.execute(
-            "INSERT INTO admin_users (username, password_hash, created_at, must_change_password, email) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (default_username, password_hash, now, 1 if generated else 0, default_email),
-        )
-        conn.execute(
-            "INSERT INTO password_history (username, password_hash, changed_at) VALUES (%s, %s, %s)",
-            (default_username, password_hash, now),
-        )
-        conn.commit()
-        print("=" * 64)
-        print(f" First run (PostgreSQL): an admin account was created.")
-        print(f"   Username: {default_username}")
-        if generated:
-            print(f"   Password: {password}")
-            print(" This password was randomly generated and is shown ONLY")
-            print(" here, once. Save it now. You will be required to change")
-            print(" it the moment you log in at /admin.")
-        else:
-            print(" Password: (the value of ADMIN_PASSWORD in your .env)")
-        print("=" * 64)
-    conn.commit()
-    conn.close()
+    """Serialize schema/bootstrap across workers; never print credentials."""
+    with get_db() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(72419301)")
+        conn.executescript(POSTGRES_SCHEMA)
+        _migrate(conn)
+        existing = conn.execute("SELECT COUNT(*) AS c FROM admin_users").fetchone()
+        if not existing or existing["c"] == 0:
+            if not default_password or len(default_password) < 12 or default_password.startswith("change-this"):
+                raise ValueError("Set a unique ADMIN_PASSWORD of at least 12 characters before first startup.")
+            password_hash = generate_password_hash(default_password)
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            conn.execute("INSERT INTO admin_users (username, password_hash, created_at, must_change_password, email) VALUES (%s, %s, %s, 1, %s)", (default_username, password_hash, now, default_email))
+            conn.execute("INSERT INTO password_history (username, password_hash, changed_at) VALUES (%s, %s, %s)", (default_username, password_hash, now))
 
 def _humanize_delta(changed_at_iso):
     """'3 hours ago' / '2 days ago' style label for a past ISO timestamp."""
@@ -447,7 +442,9 @@ def _humanize_delta(changed_at_iso):
         changed_at = datetime.datetime.fromisoformat(changed_at_iso)
     except Exception:
         return "recently"
-    delta = datetime.datetime.utcnow() - changed_at
+    if changed_at.tzinfo is None:
+        changed_at = changed_at.replace(tzinfo=datetime.timezone.utc)
+    delta = datetime.datetime.now(datetime.timezone.utc) - changed_at
     seconds = max(delta.total_seconds(), 0)
     if seconds < 3600:
         minutes = max(int(seconds // 60), 1)
@@ -460,34 +457,40 @@ def _humanize_delta(changed_at_iso):
 
 def record_password_history(username, password_hash):
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO password_history (username, password_hash, changed_at) VALUES (%s, %s, %s)",
-        (username, password_hash, now),
-    )
-    # Keep only the last 5 hashes per account
-    conn.execute(
-        "DELETE FROM password_history WHERE username = %s AND id NOT IN "
-        "(SELECT id FROM password_history WHERE username = %s ORDER BY id DESC LIMIT 5)",
-        (username, username),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO password_history (username, password_hash, changed_at) VALUES (%s, %s, %s)",
+            (username, password_hash, now),
+        )
+        # Keep only the last 5 hashes per account
+        conn.execute(
+            "DELETE FROM password_history WHERE username = %s AND id NOT IN "
+            "(SELECT id FROM password_history WHERE username = %s ORDER BY id DESC LIMIT 5)",
+            (username, username),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def find_password_in_history(username, plaintext_password, current_hash):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT password_hash, changed_at FROM password_history "
-        "WHERE username = %s ORDER BY id DESC",
-        (username,),
-    ).fetchall()
-    conn.close()
-    for row in rows:
-        if row["password_hash"] == current_hash:
-            continue
-        if check_password_hash(row["password_hash"], plaintext_password):
-            return _humanize_delta(row["changed_at"])
-    return None
+    try:
+        rows = conn.execute(
+            "SELECT password_hash, changed_at FROM password_history "
+            "WHERE username = %s ORDER BY id DESC",
+            (username,),
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            if row["password_hash"] == current_hash:
+                continue
+            if check_password_hash(row["password_hash"], plaintext_password):
+                return _humanize_delta(row["changed_at"])
+        return None
+    finally:
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Login lockout (brute-force protection)
@@ -497,139 +500,197 @@ LOCKOUT_WINDOW_MINUTES = 15
 
 def record_login_attempt(username, ip_address, success):
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO login_attempts (username, ip_address, attempted_at, success) VALUES (%s, %s, %s, %s)",
-        (username.lower(), ip_address, now, 1 if success else 0),
-    )
-    cutoff = (
-        datetime.datetime.utcnow() - datetime.timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
-    ).isoformat()
-    conn.execute("DELETE FROM login_attempts WHERE attempted_at < %s", (cutoff,))
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO login_attempts (username, ip_address, attempted_at, success) VALUES (%s, %s, %s, %s)",
+            (username.lower(), ip_address, now, 1 if success else 0),
+        )
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
+        ).isoformat()
+        conn.execute("DELETE FROM login_attempts WHERE attempted_at < %s", (cutoff,))
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def is_locked_out(username, ip_address):
     cutoff = (
-        datetime.datetime.utcnow() - datetime.timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
     ).isoformat()
     conn = get_db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM login_attempts "
-        "WHERE username = %s AND ip_address = %s AND success = 0 AND attempted_at >= %s",
-        (username.lower(), ip_address, cutoff),
-    ).fetchone()
-    conn.close()
-    return (row["c"] if row else 0) >= LOCKOUT_MAX_ATTEMPTS
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM login_attempts "
+            "WHERE (username = %s OR ip_address = %s) AND success = 0 AND attempted_at >= %s",
+            (username.lower(), ip_address, cutoff),
+        ).fetchone()
+        conn.close()
+        return (row["c"] if row else 0) >= LOCKOUT_MAX_ATTEMPTS
+    finally:
+        conn.close()
 
 def clear_login_attempts(username, ip_address):
     conn = get_db()
-    conn.execute(
-        "DELETE FROM login_attempts WHERE username = %s AND ip_address = %s",
-        (username.lower(), ip_address),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "DELETE FROM login_attempts WHERE username = %s AND ip_address = %s",
+            (username.lower(), ip_address),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def clear_all_login_attempts_for_user(username):
     conn = get_db()
-    conn.execute(
-        "DELETE FROM login_attempts WHERE username = %s",
-        (username.lower(),),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "DELETE FROM login_attempts WHERE username = %s",
+            (username.lower(),),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def set_must_change_password(username, value=True):
     conn = get_db()
-    conn.execute(
-        "UPDATE admin_users SET must_change_password = %s WHERE username = %s",
-        (1 if value else 0, username),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE admin_users SET must_change_password = %s WHERE username = %s",
+            (1 if value else 0, username),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def find_admin_by_username_or_email(identifier):
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM admin_users WHERE lower(username) = lower(%s) OR lower(email) = lower(%s)",
-        (identifier, identifier),
-    ).fetchone()
-    conn.close()
-    return row
+    try:
+        row = conn.execute(
+            "SELECT * FROM admin_users WHERE lower(username) = lower(%s) OR lower(email) = lower(%s)",
+            (identifier, identifier),
+        ).fetchone()
+        conn.close()
+        return row
+    finally:
+        conn.close()
 
-def set_password(username, new_password_plain):
+def _set_password_in_transaction(conn, username, new_password_plain, expected_hash=None):
+    row = conn.execute("SELECT password_hash FROM admin_users WHERE username = %s FOR UPDATE", (username,)).fetchone()
+    if not row or (expected_hash is not None and row["password_hash"] != expected_hash):
+        raise ValueError("Account changed. Please log in again.")
+    history = conn.execute("SELECT password_hash FROM password_history WHERE username = %s ORDER BY id DESC LIMIT 5", (username,)).fetchall()
+    if any(check_password_hash(item["password_hash"], new_password_plain) for item in [row] + history):
+        raise ValueError("Choose a password you have not used recently.")
     new_hash = generate_password_hash(new_password_plain)
-    conn = get_db()
-    conn.execute(
-        "UPDATE admin_users SET password_hash = %s, must_change_password = 0 WHERE username = %s",
-        (new_hash, username),
-    )
-    conn.commit()
-    conn.close()
-    record_password_history(username, new_hash)
-    clear_all_login_attempts_for_user(username)
+    conn.execute("UPDATE admin_users SET password_hash = %s, must_change_password = 0 WHERE username = %s", (new_hash, username))
+    conn.execute("INSERT INTO password_history (username, password_hash, changed_at) VALUES (%s, %s, %s)", (username, new_hash, datetime.datetime.now(datetime.timezone.utc).isoformat()))
+    conn.execute("DELETE FROM password_history WHERE username = %s AND id NOT IN (SELECT id FROM password_history WHERE username = %s ORDER BY id DESC LIMIT 5)", (username, username))
+    conn.execute("DELETE FROM login_attempts WHERE lower(username) = lower(%s)", (username,))
+    conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE username = %s", (username,))
     return new_hash
+
+def set_password(username, new_password_plain, expected_hash=None):
+    with get_db() as conn:
+        return _set_password_in_transaction(conn, username, new_password_plain, expected_hash)
+
+def reset_password_with_token(raw_token, new_password_plain):
+    if not isinstance(raw_token, str) or not raw_token or len(raw_token) > 256:
+        return None
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    with get_db() as conn:
+        # Lock the account first: all password operations use this lock order.
+        token = conn.execute("SELECT username FROM password_reset_tokens WHERE token_hash = %s", (token_hash,)).fetchone()
+        if not token:
+            return None
+        conn.execute("SELECT id FROM admin_users WHERE username = %s FOR UPDATE", (token["username"],)).fetchone()
+        consumed = conn.execute(
+            "UPDATE password_reset_tokens SET used = 1 WHERE token_hash = %s AND used = 0 "
+            "AND expires_at::timestamptz > CURRENT_TIMESTAMP RETURNING username", (token_hash,)
+        ).fetchone()
+        if not consumed:
+            return None
+        _set_password_in_transaction(conn, consumed["username"], new_password_plain)
+        return consumed["username"]
 
 # ---------------------------------------------------------------------------
 # Visitor Management
 # ---------------------------------------------------------------------------
 def get_visitor_stats():
     conn = get_db()
-    row = conn.execute("SELECT * FROM visitor_stats WHERE id = 1").fetchone()
-    conn.close()
-    return row
+    try:
+        row = conn.execute("SELECT * FROM visitor_stats WHERE id = 1").fetchone()
+        conn.close()
+        return row
+    finally:
+        conn.close()
 
 def set_visitor_mode(mode):
     if mode not in ("auto", "manual", "hidden"):
         raise ValueError("mode must be 'auto', 'manual' or 'hidden'")
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "UPDATE visitor_stats SET mode = %s, updated_at = %s WHERE id = 1",
-        (mode, now),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE visitor_stats SET mode = %s, updated_at = %s WHERE id = 1",
+            (mode, now),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def set_manual_count(count):
     count = max(0, int(count))
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "UPDATE visitor_stats SET manual_count = %s, updated_at = %s WHERE id = 1",
-        (count, now),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE visitor_stats SET manual_count = %s, updated_at = %s WHERE id = 1",
+            (count, now),
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def record_unique_visitor(visitor_token):
-    now = datetime.datetime.utcnow().isoformat()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     conn = get_db()
-    
-    cur = conn.execute(
-        "INSERT INTO unique_visitors (visitor_token, first_seen, last_seen) "
-        "VALUES (%s, %s, %s) ON CONFLICT (visitor_token) DO NOTHING",
-        (visitor_token, now, now),
-    )
-    
-    is_new = cur.rowcount > 0
-    if not is_new:
-        conn.execute(
-            "UPDATE unique_visitors SET last_seen = %s WHERE visitor_token = %s",
-            (now, visitor_token),
+    try:
+
+        cur = conn.execute(
+            "INSERT INTO unique_visitors (visitor_token, first_seen, last_seen) "
+            "VALUES (%s, %s, %s) ON CONFLICT (visitor_token) DO NOTHING",
+            (visitor_token, now, now),
         )
-    conn.commit()
-    count_row = conn.execute("SELECT COUNT(*) AS c FROM unique_visitors").fetchone()
-    total = count_row["c"] if count_row else 0
-    conn.close()
-    return is_new, total
+
+        is_new = cur.rowcount > 0
+        if not is_new:
+            conn.execute(
+                "UPDATE unique_visitors SET last_seen = %s WHERE visitor_token = %s",
+                (now, visitor_token),
+            )
+        conn.commit()
+        count_row = conn.execute("SELECT COUNT(*) AS c FROM unique_visitors").fetchone()
+        total = count_row["c"] if count_row else 0
+        conn.close()
+        return is_new, total
+    finally:
+        conn.close()
 
 def get_unique_visitor_count():
     conn = get_db()
-    row = conn.execute("SELECT COUNT(*) AS c FROM unique_visitors").fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    try:
+        row = conn.execute("SELECT COUNT(*) AS c FROM unique_visitors").fetchone()
+        conn.close()
+        return row["c"] if row else 0
+    finally:
+        conn.close()
 
 def get_display_visitor_count():
     row = get_visitor_stats()
@@ -648,22 +709,28 @@ def normalize_answer(answer):
 
 def get_security_questions():
     conn = get_db()
-    rows = conn.execute("SELECT id, question FROM security_questions ORDER BY id").fetchall()
-    conn.close()
-    return rows
+    try:
+        rows = conn.execute("SELECT id, question FROM security_questions ORDER BY id").fetchall()
+        conn.close()
+        return rows
+    finally:
+        conn.close()
 
 def get_user_security_questions(admin_user_id):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT sq.id as question_id, sq.question "
-        "FROM security_questions sq "
-        "JOIN admin_security_answers asa ON sq.id = asa.question_id "
-        "WHERE asa.admin_user_id = %s "
-        "ORDER BY sq.id",
-        (admin_user_id,)
-    ).fetchall()
-    conn.close()
-    return rows
+    try:
+        rows = conn.execute(
+            "SELECT sq.id as question_id, sq.question "
+            "FROM security_questions sq "
+            "JOIN admin_security_answers asa ON sq.id = asa.question_id "
+            "WHERE asa.admin_user_id = %s "
+            "ORDER BY sq.id",
+            (admin_user_id,)
+        ).fetchall()
+        conn.close()
+        return rows
+    finally:
+        conn.close()
 
 def has_security_setup(username):
     admin = find_admin_by_username_or_email(username)
@@ -673,104 +740,151 @@ def has_security_setup(username):
 
 def save_security_answers(admin_user_id, answers):
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    for a in answers:
-        conn.execute(
-            "INSERT INTO admin_security_answers (admin_user_id, question_id, answer_hash, created_at) "
-            "VALUES (%s, %s, %s, %s)",
-            (admin_user_id, a["question_id"], a["answer_hash"], now)
-        )
-    conn.execute("UPDATE admin_users SET security_setup_completed = 1 WHERE id = %s", (admin_user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("SELECT id FROM admin_users WHERE id = %s FOR UPDATE", (admin_user_id,))
+        conn.execute("DELETE FROM admin_security_answers WHERE admin_user_id = %s", (admin_user_id,))
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for a in answers:
+            conn.execute(
+                "INSERT INTO admin_security_answers (admin_user_id, question_id, answer_hash, created_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (admin_user_id, a["question_id"], a["answer_hash"], now)
+            )
+        conn.execute("UPDATE admin_users SET security_setup_completed = 1 WHERE id = %s", (admin_user_id,))
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def verify_security_answers(admin_user_id, answers):
     conn = get_db()
-    saved_answers = conn.execute(
-        "SELECT question_id, answer_hash FROM admin_security_answers WHERE admin_user_id = %s",
-        (admin_user_id,)
-    ).fetchall()
-    conn.close()
-    
-    if not saved_answers or len(saved_answers) != 3:
-        return False
-        
-    saved_dict = {row["question_id"]: row["answer_hash"] for row in saved_answers}
-    
-    match_count = 0
-    for a in answers:
-        q_id = a.get("question_id")
-        ans = a.get("answer")
-        if q_id in saved_dict and ans:
-            norm_ans = normalize_answer(ans)
-            if check_password_hash(saved_dict[q_id], norm_ans):
-                match_count += 1
-                
-    return match_count == 3
+    try:
+        saved_answers = conn.execute(
+            "SELECT question_id, answer_hash FROM admin_security_answers WHERE admin_user_id = %s",
+            (admin_user_id,)
+        ).fetchall()
+        conn.close()
+
+        if not saved_answers or len(saved_answers) != 3:
+            return False
+
+        saved_dict = {row["question_id"]: row["answer_hash"] for row in saved_answers}
+
+        if not isinstance(answers, list) or len(answers) != 3:
+            return False
+        if any(not isinstance(a, dict) or not isinstance(a.get("question_id"), int)
+               or not isinstance(a.get("answer"), str) for a in answers):
+            return False
+        if {a["question_id"] for a in answers} != set(saved_dict):
+            return False
+        match_count = 0
+        for a in answers:
+            q_id = a.get("question_id")
+            ans = a.get("answer")
+            if q_id in saved_dict and ans:
+                norm_ans = normalize_answer(ans)
+                if check_password_hash(saved_dict[q_id], norm_ans):
+                    match_count += 1
+
+        return match_count == 3
+    finally:
+        conn.close()
 
 def create_reset_token(username):
-    raw_token = uuid.uuid4().hex
+    raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     expires = (now + datetime.timedelta(minutes=15)).isoformat()
-    
+
     conn = get_db()
-    conn.execute(
-        "INSERT INTO password_reset_tokens (username, token_hash, created_at, expires_at, used) "
-        "VALUES (%s, %s, %s, %s, 0)",
-        (username, token_hash, now.isoformat(), expires)
-    )
-    conn.commit()
-    conn.close()
-    return raw_token
+    try:
+        conn.execute(
+            "INSERT INTO password_reset_tokens (username, token_hash, created_at, expires_at, used) "
+            "VALUES (%s, %s, %s, %s, 0)",
+            (username, token_hash, now.isoformat(), expires)
+        )
+        conn.commit()
+        conn.close()
+        return raw_token
+    finally:
+        conn.close()
 
 def validate_reset_token(raw_token):
     token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
-    now = datetime.datetime.utcnow().isoformat()
-    
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
     conn = get_db()
-    row = conn.execute(
-        "SELECT username FROM password_reset_tokens "
-        "WHERE token_hash = %s AND used = 0 AND expires_at > %s",
-        (token_hash, now)
-    ).fetchone()
-    conn.close()
-    return row["username"] if row else None
+    try:
+        row = conn.execute(
+            "SELECT username FROM password_reset_tokens "
+            "WHERE token_hash = %s AND used = 0 AND expires_at > %s",
+            (token_hash, now)
+        ).fetchone()
+        conn.close()
+        return row["username"] if row else None
+    finally:
+        conn.close()
 
 def invalidate_reset_token(raw_token):
     token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
     conn = get_db()
-    conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE token_hash = %s", (token_hash,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE token_hash = %s", (token_hash,))
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def cleanup_expired_tokens():
-    now = datetime.datetime.utcnow().isoformat()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     conn = get_db()
-    conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < %s", (now,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < %s", (now,))
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def record_recovery_attempt(username, ip, success):
     conn = get_db()
-    now = datetime.datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO recovery_attempts (username, ip_address, attempted_at, success) VALUES (%s, %s, %s, %s)",
-        (username, ip, now, 1 if success else 0)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO recovery_attempts (username, ip_address, attempted_at, success) VALUES (%s, %s, %s, %s)",
+            (username, ip, now, 1 if success else 0)
+        )
+        conn.commit()
+        conn.close()
+    finally:
+        conn.close()
 
 def get_recovery_attempt_count(username, ip):
-    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(minutes=30)).isoformat()
+    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)).isoformat()
     conn = get_db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM recovery_attempts "
-        "WHERE username = %s AND ip_address = %s AND attempted_at >= %s",
-        (username, ip, cutoff)
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM recovery_attempts "
+            "WHERE (lower(username) = lower(%s) OR ip_address = %s) AND attempted_at >= %s",
+            (username, ip, cutoff)
+        ).fetchone()
+        conn.close()
+        return row["c"] if row else 0
+    finally:
+        conn.close()
 
 def is_recovery_locked_out(username, ip):
     return get_recovery_attempt_count(username, ip) >= 5
+
+
+def admit_request(key, max_requests, window_seconds):
+    """Atomic shared sliding-window admission across workers and instances."""
+    bucket = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    lock_id = int.from_bytes(bytes.fromhex(bucket)[:8], "big", signed=True)
+    with get_db() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+        conn.execute("DELETE FROM request_rate_limits WHERE attempted_at < CURRENT_TIMESTAMP - INTERVAL '1 day'")
+        count = conn.execute("SELECT COUNT(*) AS c FROM request_rate_limits WHERE bucket = %s AND attempted_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')", (bucket, window_seconds)).fetchone()["c"]
+        if count >= max_requests:
+            return False
+        conn.execute("INSERT INTO request_rate_limits (bucket) VALUES (%s)", (bucket,))
+        return True

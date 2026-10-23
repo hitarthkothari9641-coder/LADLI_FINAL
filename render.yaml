@@ -1,8 +1,8 @@
 # =============================================================================
-# render.yaml — Render Blueprint for LADLI (100% free tier, $0 billing)
+# render.yaml — Primary deployment target: Render + PostgreSQL
 # =============================================================================
 # Create the stack:  Render Dashboard → New → Blueprint → pick this repo.
-# Everything below uses plan "free" — no credit card, no billing.
+# Verify current plan availability, database expiry, backups and capacity with the owner.
 #
 # Notes about the free tier:
 #   * Free web services sleep after ~15 min of inactivity and cold-start in
@@ -11,8 +11,8 @@
 #     expiry date shown in the Render dashboard.
 #   * Free instances have an ephemeral disk, so quote-attachment PDFs are
 #     only durable when AWS S3 is configured (AWS_S3_BUCKET / AWS_REGION /
-#     credentials). Without S3 the app still works, but uploaded PDFs are
-#     lost on redeploy/sleep.
+#     credentials). Production uploads are rejected without S3; enquiries
+#     without attachments and public pages remain available.
 # =============================================================================
 
 databases:
@@ -55,8 +55,19 @@ services:
         value: "0"
       - key: FORCE_SECURE_COOKIES
         value: "true"
+      # Configure actual trusted peers before enabling forwarded client IPs.
       - key: TRUSTED_PROXY_COUNT
-        value: "1"
+        value: "0"
+      - key: GUNICORN_FORWARDED_ALLOW_IPS
+        value: "127.0.0.1,::1"
+      - key: ALLOW_SECURITY_QUESTION_RECOVERY
+        value: "false"
+      - key: DB_POOL_MAX
+        value: "5"
+      - key: DB_STATEMENT_TIMEOUT_MS
+        value: "15000"
+      - key: DB_LOCK_TIMEOUT_MS
+        value: "5000"
 
       # --- Gunicorn (small footprint for the 512 MB free instance) ---------
       - key: GUNICORN_WORKERS
@@ -74,7 +85,7 @@ services:
       - key: ADMIN_EMAIL
         sync: false
 
-      # --- Optional: AWS S3 attachment storage ------------------------------
+      # --- Required for production attachment uploads: AWS S3 storage ------------------------------
       # - key: AWS_S3_BUCKET
       #   sync: false
       # - key: AWS_REGION
