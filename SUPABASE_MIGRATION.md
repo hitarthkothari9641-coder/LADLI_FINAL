@@ -68,7 +68,8 @@ the proxy secret separately. Never upload `.dist/ladli-local-secrets.json`.
 ## Verified
 
 - Python baseline: 27 passed, 9 disposable-Postgres tests skipped locally.
-  CI provides PostgreSQL for those integration tests.
+  GitHub CI passed on Python 3.11 and 3.13 with PostgreSQL integration tests;
+  dependency auditing and secret scanning also passed (run 44742711767).
 - Node: 20 routing/API/security/validation tests passed.
 - Deno type check passed for the two-file function entry point.
 - Live SQL checks verified private tables and reference seeds. Transactional
@@ -86,8 +87,10 @@ the proxy secret separately. Never upload `.dist/ladli-local-secrets.json`.
 1. Verify the owner's real preview login, dashboard, status updates, private
    attachment download and logout. Keep the two marked migration test
    enquiries for verification; they are not customer requests.
-2. Compare the complete GoDaddy DNS zone with imported Cloudflare records,
-   preserving email, SPF, DKIM, DMARC and ownership verification records.
+2. GoDaddy's full DNS export is saved in ignored `.dist/` for rollback. All
+   11 portable records were compared with Cloudflare; both DKIM aliases missed
+   by scanning were added DNS-only. MX, SPF, DMARC, email and autodiscovery are
+   preserved. Existing DNSSEC is off. Recheck for concurrent edits at cutover.
 3. Activate Cloudflare DNS using assigned nameservers
    `arnold.ns.cloudflare.com` and `edna.ns.cloudflare.com`. Current GoDaddy
    nameservers: `ns75.domaincontrol.com` and `ns76.domaincontrol.com`.
