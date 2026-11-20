@@ -45,6 +45,8 @@ test('preview indexing exclusions do not leak into production responses or robot
   assert.equal(response.headers.has('x-robots-tag'), false);
   assert.equal(response.headers.get('X-Frame-Options'), 'DENY');
   assert.match(response.headers.get('Content-Security-Policy'), /connect-src 'self'/);
+  for (const directive of ["base-uri 'self'", "object-src 'none'", "form-action 'self'"])
+    assert.ok(response.headers.get('Content-Security-Policy').includes(directive));
   const robots = await (await worker.fetch(new Request('https://ladlilab.com/robots.txt'), production)).text();
   assert.match(robots, /Sitemap: https:\/\/ladlilab.com\/sitemap.xml/);
   assert.doesNotMatch(robots, /^Disallow: \/$/m);
