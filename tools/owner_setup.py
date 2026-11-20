@@ -2,6 +2,7 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import html
 from pathlib import Path
 import re
 import secrets
@@ -42,6 +43,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8174)
     parser.add_argument('--secrets', type=Path, default=Path('.dist/ladli-local-secrets.json'))
+    parser.add_argument('--reset-owner', metavar='USERNAME', help='Recover this existing owner locally; does not create an account.')
     args = parser.parse_args()
     configuration = json.loads(args.secrets.read_text(encoding='utf-8'))
     project_url, api_key = configuration['url'], configuration['serviceKey']
@@ -50,6 +52,25 @@ def main():
     nonce = '/' + secrets.token_urlsafe(32)
     origin = f'http://127.0.0.1:{args.port}'
     complete = args.secrets.parent / 'owner-setup-complete.json'
+    page, owner = PAGE, None
+    if args.reset_owner:
+        headers = {'apikey': api_key}
+        if not api_key.startswith('sb_secret_'):
+            headers['Authorization'] = 'Bearer ' + api_key
+        request = urllib.request.Request(project_url + '/rest/v1/admin_users?select=id,username,email,password_hash', headers=headers)
+        with urllib.request.urlopen(request, timeout=20) as response:
+            owners = json.load(response)
+        if len(owners) != 1 or owners[0]['username'] != args.reset_owner:
+            raise SystemExit('Recovery requires exactly one matching owner account.')
+        owner = owners[0]
+        complete = args.secrets.parent / 'owner-reset-complete.json'
+        page = PAGE.replace('LADLI owner setup', 'LADLI owner recovery').replace(
+            'Create the administrator login for your fresh database.', 'Set a new password for your existing website owner login.').replace(
+            'Create owner login', 'Save new owner password').replace(
+            'Creating your owner login…', 'Saving your new owner password…').replace(
+            'Owner login created successfully.', 'Owner password updated successfully. Sign in on the Cloudflare preview with this new password.').replace(
+            'value="admin"', 'value="' + html.escape(owner['username'], quote=True) + '" readonly').replace(
+            'value="ladlielec@gmail.com"', 'value="' + html.escape(owner['email'], quote=True) + '" readonly')
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -72,7 +93,7 @@ def main():
         def do_GET(self):
             if not self.valid_target():
                 return self.reply(404, {'error': 'Not found.'})
-            self.reply(200, PAGE, 'text/html; charset=utf-8')
+            self.reply(200, page, 'text/html; charset=utf-8')
 
         def do_POST(self):
             if not self.valid_target() or self.headers.get('Origin') != origin:
@@ -92,10 +113,20 @@ def main():
                 headers = {'apikey': api_key, 'Content-Type': 'application/json'}
                 if not api_key.startswith('sb_secret_'):
                     headers['Authorization'] = 'Bearer ' + api_key
-                request = urllib.request.Request(project_url + '/rest/v1/rpc/ladli_provision_owner',
-                    data=json.dumps({'p_username': username, 'p_hash': encoded, 'p_email': email}).encode(), headers=headers, method='POST')
+                if owner:
+                    if username != owner['username'] or email != owner['email']:
+                        raise ValueError('Recovery account cannot be changed.')
+                    rpc, payload = 'ladli_change_password', {'p_user': owner['id'], 'p_expected_hash': owner['password_hash'], 'p_new_hash': encoded}
+                else:
+                    rpc, payload = 'ladli_provision_owner', {'p_username': username, 'p_hash': encoded, 'p_email': email}
+                request = urllib.request.Request(project_url + '/rest/v1/rpc/' + rpc,
+                    data=json.dumps(payload).encode(), headers=headers, method='POST')
                 with urllib.request.urlopen(request, timeout=20) as response:
                     owner_id = json.load(response)
+                if owner:
+                    if owner_id is not True:
+                        raise ValueError('Owner changed; restart recovery.')
+                    owner_id = owner['id']
                 complete.write_text(json.dumps({'username': username, 'email': email, 'id': owner_id}), encoding='utf-8')
                 self.reply(200, {'ok': True})
             except (ValueError, KeyError, TypeError):

@@ -37,7 +37,7 @@ const Admin = (() => {
       credentials: 'same-origin',
     });
 
-    if (res.status === 401) {
+    if (res.status === 401 && path !== '/api/admin/login') {
       window.location.href = '/admin/login';
       throw new Error('Not authenticated');
     }
