@@ -10,6 +10,12 @@ const securityHeaders = {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.hostname === 'www.ladlilab.com') {
+      url.hostname = 'ladlilab.com';
+      url.protocol = 'https:';
+      return new Response(null, { status: ['GET', 'HEAD'].includes(request.method) ? 301 : 308,
+        headers: { ...securityHeaders, Location: url.href } });
+    }
     const path = url.pathname;
     const production = env.PREVIEW_MODE === 'false' && ['ladlilab.com', 'www.ladlilab.com'].includes(url.hostname);
     const staticFetch = async assetRequest => {

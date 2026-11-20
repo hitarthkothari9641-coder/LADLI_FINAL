@@ -3,6 +3,10 @@
   "main": "worker.mjs",
   "compatibility_date": "2026-11-20",
   "account_id": "a12b93a39b1227f4d9c4f8ec85760bee",
+  "routes": [
+    { "pattern": "ladlilab.com/*", "zone_name": "ladlilab.com" },
+    { "pattern": "www.ladlilab.com/*", "zone_name": "ladlilab.com" }
+  ],
   "assets": {
     "directory": "../.dist/cloudflare",
     "binding": "ASSETS",
@@ -12,6 +16,6 @@
   },
   "vars": {
     "SUPABASE_PROJECT_URL": "https://xybtgvuugfsewduccsxz.supabase.co",
-    "PREVIEW_MODE": "true"
+    "PREVIEW_MODE": "false"
   }
 }

@@ -18,6 +18,14 @@ test('homepage resolves to index.html without changing the public URL', async ()
   assert.equal(await response.text(), 'unchanged site content');
 });
 
+test('www preserves the canonical host redirect and request paths', async () => {
+  for (const [method, status] of [['GET', 301], ['POST', 308]]) {
+    const response = await worker.fetch(new Request('https://www.ladlilab.com/resources.html?from=test', { method }), {});
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('Location'), 'https://ladlilab.com/resources.html?from=test');
+  }
+});
+
 test('existing .html URLs and retired links preserve canonical routing', async () => {
   const calls = [], env = { ASSETS: assets(calls) };
   assert.equal((await worker.fetch(new Request('https://preview.example/resources.html'), env)).status, 200);

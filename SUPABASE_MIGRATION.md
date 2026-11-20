@@ -1,105 +1,119 @@
-# LADLI free hosting migration
+# LADLI production hosting
 
-Prepared from production commit `6954bac`, 20 November 2026. Use free plans
-only. The owner explicitly chose a fresh database: no historical enquiries or
-accounts are required. Render's expired database was not restored.
+Completed on 20 November 2026. The live website uses Cloudflare Workers and
+Supabase Free plans. Render no longer has the custom-domain bindings.
 
-## Deployed preview
+- Website: https://ladlilab.com/
+- Owner login: https://ladlilab.com/admin/login
+- Readiness: https://ladlilab.com/ready
+- Supabase: `ladli-production`, project `xybtgvuugfsewduccsxz`
+- Cloudflare account: `a12b93a39b1227f4d9c4f8ec85760bee`
+- DNS zone: `24342a995e4b802e6181a18b3e7474c1`
 
-- Website: https://ladli-app.ladlielec.workers.dev/
-- Supabase project: `ladli-production`, ref `xybtgvuugfsewduccsxz`.
-- Cloudflare `ladli-app` runs `cloudflare/worker.mjs`. Its `ASSETS` service
-  binding points to the static-only `ladli-preview` Worker. Use a service
-  binding for communication between Workers in this account.
-- The static bundle has 124 files, including the existing admin UI. HTML
-  handling is `none`, preserving existing `.html` URLs; the router maps
-  `/` to `/index.html` and preserves legacy canonical redirects.
-- Preview responses have `X-Robots-Tag: noindex, nofollow` and disallow all
-  crawlers. Keep preview indexing exclusions until domain cutover.
-- Supabase `ladli-api` contains `index.ts` and `handler.mjs`; deploy both.
-  The gateway strips `/functions/v1` from request URLs.
+The owner explicitly chose a fresh database with no historical records. The
+owner created their password privately and confirmed both preview and live
+admin sign-in. No password reset was needed; the unused recovery server was
+stopped. No plaintext owner password is stored in this repository.
 
-## Database and security
+## Architecture and routing
 
-All three versioned migrations have been applied. The 13 application tables
-have RLS and no public or authenticated-client access. Only the backend service
-role can read private data or call the privileged application RPCs.
+`ladli-app` runs `cloudflare/worker.mjs`, with an `ASSETS` service binding to
+static-only Worker `ladli-preview`. Its 124-file bundle includes the existing
+public pages and static admin UI. Use the internal service binding rather
+than a public fetch between Workers on this account.
 
-The owner created their new `admin` account privately. One-time provisioning
-refuses to run if any admin already exists. Passwords use Werkzeug-compatible
-PBKDF2 with one million iterations; plaintext passwords never enter migration
-files. The temporary loopback owner setup server has been stopped.
+The DNS zone has 11 records. The apex A record is proxied and points to the
+reserved documentation address `192.0.2.1`; this is a placeholder, never an
+application origin. The Worker handles every request through routes
+`ladlilab.com/*` and `www.ladlilab.com/*`, both fail-closed. The proxied www
+CNAME points to `ladlilab.com`. No web DNS record points to Render.
 
-Private PDF storage is `ladli-attachments`, restricted to PDFs up to 3 MB.
-Admin sessions store token hashes and CSRF tokens server-side, expire after
-30 minutes, and are revoked after password changes. Shared database rate
-limits and login lockouts survive serverless restarts. Public password
-recovery remains disabled, matching the owner-controlled production policy.
+Nameservers are `arnold.ns.cloudflare.com` and `edna.ns.cloudflare.com`.
+GoDaddy's complete DNS export is saved under ignored `.dist/` for rollback.
+All portable records were compared. Both DKIM records missed by automatic
+scanning were added DNS-only; MX, SPF, DMARC, email and autodiscovery records
+are preserved. Cloudflare Universal SSL is active and Always Use HTTPS is on.
 
-The Supabase function requires `LADLI_PROXY_TOKEN` and an exact origin
-allowlist. Legacy JWT gateway verification is off because custom proxy auth
-and separate administrator sessions implement authentication. Direct private
-requests without the proxy token are rejected. Supabase service keys remain
-inside the backend and must never be included in site assets.
+The previous Render custom hostname took routing priority over normal
+Cloudflare DNS routes. Both Render bindings were removed with explicit owner
+approval after the new API, owner login and private storage were verified.
+The Render service remains at `https://ladli-final.onrender.com`. Its expired
+old database is not a working backend rollback; it can serve the old public
+pages only unless its backend is separately restored.
 
-## Deployment configuration
+The router keeps `.html` URLs, legacy redirects and sitemap URLs, maps `/` to
+`/index.html`, and redirects www to the apex (301 for GET/HEAD, 308 otherwise).
+Public production pages are indexable. Admin pages remain noindex/no-store;
+the workers.dev preview remains noindex even with production enabled.
 
-Cloudflare runtime values:
+## Backend and security
+
+Supabase `ladli-api` uses `index.ts` and `handler.mjs`; deploy both together.
+The hosted gateway strips `/functions/v1` before forwarding requests.
+All three versioned SQL migrations were applied through the SQL editor.
+Before adopting CLI database deployment, reconcile its migration history with
+`supabase migration repair`; do not blindly replay these on the live project.
+
+All 13 application tables have RLS and no public or authenticated-client table
+access. Privileged RPCs are service-role-only. The private `ladli-attachments`
+bucket accepts PDFs up to 3 MB. No service key belongs in browser assets.
+
+Owner password hashes are Werkzeug-compatible PBKDF2 with one million
+iterations. Sessions store token hashes and CSRF tokens, expire after 30
+minutes and are invalidated after password changes. Shared database rate
+limits and login lockouts survive restarts. Public password recovery remains
+disabled, matching the owner-controlled production policy.
+
+The Edge Function uses custom proxy authentication rather than legacy JWT
+verification. `LADLI_PROXY_TOKEN` is required on private function requests;
+admin sessions independently protect customer data. Wrong tokens and foreign
+origins are rejected. The secret API key is injected by Supabase, with the
+new key sent only in the server-side `apikey` header.
+
+## Runtime configuration
+
+Cloudflare:
 
 - `SUPABASE_PROJECT_URL`: `https://xybtgvuugfsewduccsxz.supabase.co`
-- `PREVIEW_MODE`: `true` until production cutover
+- `PREVIEW_MODE`: `false` (only the real production hostnames become indexable)
 - `ASSETS`: service binding to `ladli-preview`
-- `LADLI_PROXY_TOKEN`: encrypted secret, same value as Supabase
+- `LADLI_PROXY_TOKEN`: encrypted secret, matching Supabase
 
 Supabase function secrets:
 
 - `LADLI_PROXY_TOKEN`: private server-to-server credential
 - `LADLI_ALLOWED_ORIGINS`: `https://ladli-app.ladlielec.workers.dev,https://ladlilab.com,https://www.ladlilab.com`
 
-The function uses injected `SUPABASE_SECRET_KEYS.default`, with a legacy
-service-role fallback. New secret keys use the `apikey` header, not JWT Bearer.
+`python tools/build_cloudflare.py --production` builds the production static
+archive. Dashboard uploads must use HTML handling `none`, not-found handling
+`404-page`. The optional Wrangler configuration instead bundles assets into
+`ladli-app` under the same `ASSETS` interface. Build before deploying, configure
+the proxy secret separately, and verify that assets and bindings match the
+chosen deployment method. Never upload `.dist/ladli-local-secrets.json`.
+GitHub pushes run checks; the Cloudflare deployment is currently manual.
 
-`python tools/build_cloudflare.py` produces the preview archive under ignored
-`.dist/`. `--production` produces the production archive. Optional Wrangler
-configuration deploys `ladli-app` with an integrated `ASSETS` bundle instead
-of the Dashboard's separate static Worker; build before using it. Configure
-the proxy secret separately. Never upload `.dist/ladli-local-secrets.json`.
+## Acceptance evidence
 
-## Verified
+- 24 Node tests pass, covering API validation, proxy authentication, CSRF,
+  session handling, empty-body admin actions, storage failures and routing.
+- Python baseline: 27 passed locally, 9 disposable-Postgres tests skipped.
+  GitHub CI passed on Python 3.11 and 3.13 with PostgreSQL integration tests,
+  dependency auditing and secret scanning (run 44746678328 for API revision).
+- Deno checks pass. Live SQL smoke tests verified shared rate limiting,
+  password compare-and-swap, session invalidation and atomic question updates;
+  fixtures were rolled back.
+- All 34 production page checks passed, with public pages indexable and admin
+  pages noindex. The live `/ready` returns 200, database connected/schema ready.
+- Owner sign-in, enquiry listing/status updates, visitor statistics, private
+  PDF download integrity and logout were verified. Owner also confirmed the
+  final `ladlilab.com` admin login works.
+- The real-domain quotation form successfully inserted test enquiry 3.
+  All three clearly marked migration test enquiries are Closed, not deleted.
+- Anonymous `/api/admin/me` returns logged_in false; private enquiry listing
+  returns 401. Wrong proxy tokens and foreign origins are rejected. Private
+  storage rejects anonymous file downloads.
+- HTTP redirects to HTTPS; www and index.html redirect to the apex canonical.
+  Production robots.txt retains the real sitemap and private-path exclusions.
 
-- Python baseline: 27 passed, 9 disposable-Postgres tests skipped locally.
-  GitHub CI passed on Python 3.11 and 3.13 with PostgreSQL integration tests;
-  dependency auditing and secret scanning also passed (run 44742711767).
-- Node: 20 routing/API/security/validation tests passed.
-- Deno type check passed for the two-file function entry point.
-- Live SQL checks verified private tables and reference seeds. Transactional
-  smoke tests verified shared rate limits, password compare-and-swap, session
-  revocation and atomic question replacement; fixtures rolled back.
-- Live preview `/ready` reports database connected and schema ready.
-- Browser quote submission reached Supabase (test enquiry 1).
-- PDF upload reached private storage, backend download matched all bytes,
-  and anonymous download was blocked (test enquiry 2).
-- Wrong proxy tokens, foreign origins and unauthenticated private data access
-  were rejected. The browser preview homepage and resource images load.
-
-## Required before cutover
-
-1. Verify the owner's real preview login, dashboard, status updates, private
-   attachment download and logout. Keep the two marked migration test
-   enquiries for verification; they are not customer requests.
-2. GoDaddy's full DNS export is saved in ignored `.dist/` for rollback. All
-   11 portable records were compared with Cloudflare; both DKIM aliases missed
-   by scanning were added DNS-only. MX, SPF, DMARC, email and autodiscovery are
-   preserved. Existing DNSSEC is off. Recheck for concurrent edits at cutover.
-3. Activate Cloudflare DNS using assigned nameservers
-   `arnold.ns.cloudflare.com` and `edna.ns.cloudflare.com`. Current GoDaddy
-   nameservers: `ns75.domaincontrol.com` and `ns76.domaincontrol.com`.
-   Imported web records still point to Render during activation.
-4. Connect apex and www to the tested Worker, confirm certificates, restore
-   production robots rules and remove production noindex responses. Verify
-   HTTPS, canonical redirects, sitemap and the same form/admin flows.
-5. Keep Render available as rollback until the replacement is confirmed.
-
-At this checkpoint `ladlilab.com` still points to Render; migration is not yet
-complete. No paid upgrade has been made. Free quotas and Supabase inactivity
-pausing apply; this is not a two-year availability guarantee.
+Free quotas and Supabase inactivity pausing still apply. No paid upgrade was
+made, and free hosting is not a two-year availability guarantee.
