@@ -1,56 +1,102 @@
-# LADLI migration status
+# LADLI free hosting migration
 
-Prepared from production commit `6954bac` on 20 November 2026. This branch does
-not change the running Render service, its database URL, DNS or public pages.
+Prepared from production commit `6954bac`, 20 November 2026. Use free plans
+only. The owner explicitly chose a fresh database: no historical enquiries or
+accounts are required. Render's expired database was not restored.
 
-## Prepared
+## Deployed preview
 
-- Supabase CLI 3.2.0 initialized the local project and created the migration.
-- The migration preserves the existing Flask database schema and both numbered
-  application migrations, seeds reference questions and the visitor singleton,
-  and enables RLS on all 12 application tables.
-- Public and signed-in API clients have no table or sequence permissions.
-  Only the trusted backend service role receives API access. Never put its key
-  in browser code. The migration does not create an admin or import records.
-- A separate preview archive is generated under `.dist/` with noindex headers
-  and a robots exclusion. It must not be used as the final production package.
+- Website: https://ladli-app.ladlielec.workers.dev/
+- Supabase project: `ladli-production`, ref `xybtgvuugfsewduccsxz`.
+- Cloudflare `ladli-app` runs `cloudflare/worker.mjs`. Its `ASSETS` service
+  binding points to the static-only `ladli-preview` Worker. Use a service
+  binding for communication between Workers in this account.
+- The static bundle has 124 files, including the existing admin UI. HTML
+  handling is `none`, preserving existing `.html` URLs; the router maps
+  `/` to `/index.html` and preserves legacy canonical redirects.
+- Preview responses have `X-Robots-Tag: noindex, nofollow` and disallow all
+  crawlers. Keep preview indexing exclusions until domain cutover.
+- Supabase `ladli-api` contains `index.ts` and `handler.mjs`; deploy both.
+  The gateway strips `/functions/v1` from request URLs.
+
+## Database and security
+
+All three versioned migrations have been applied. The 13 application tables
+have RLS and no public or authenticated-client access. Only the backend service
+role can read private data or call the privileged application RPCs.
+
+The owner created their new `admin` account privately. One-time provisioning
+refuses to run if any admin already exists. Passwords use Werkzeug-compatible
+PBKDF2 with one million iterations; plaintext passwords never enter migration
+files. The temporary loopback owner setup server has been stopped.
+
+Private PDF storage is `ladli-attachments`, restricted to PDFs up to 3 MB.
+Admin sessions store token hashes and CSRF tokens server-side, expire after
+30 minutes, and are revoked after password changes. Shared database rate
+limits and login lockouts survive serverless restarts. Public password
+recovery remains disabled, matching the owner-controlled production policy.
+
+The Supabase function requires `LADLI_PROXY_TOKEN` and an exact origin
+allowlist. Legacy JWT gateway verification is off because custom proxy auth
+and separate administrator sessions implement authentication. Direct private
+requests without the proxy token are rejected. Supabase service keys remain
+inside the backend and must never be included in site assets.
+
+## Deployment configuration
+
+Cloudflare runtime values:
+
+- `SUPABASE_PROJECT_URL`: `https://xybtgvuugfsewduccsxz.supabase.co`
+- `PREVIEW_MODE`: `true` until production cutover
+- `ASSETS`: service binding to `ladli-preview`
+- `LADLI_PROXY_TOKEN`: encrypted secret, same value as Supabase
+
+Supabase function secrets:
+
+- `LADLI_PROXY_TOKEN`: private server-to-server credential
+- `LADLI_ALLOWED_ORIGINS`: `https://ladli-app.ladlielec.workers.dev,https://ladlilab.com,https://www.ladlilab.com`
+
+The function uses injected `SUPABASE_SECRET_KEYS.default`, with a legacy
+service-role fallback. New secret keys use the `apikey` header, not JWT Bearer.
+
+`python tools/build_cloudflare.py` produces the preview archive under ignored
+`.dist/`. `--production` produces the production archive. Optional Wrangler
+configuration deploys `ladli-app` with an integrated `ASSETS` bundle instead
+of the Dashboard's separate static Worker; build before using it. Configure
+the proxy secret separately. Never upload `.dist/ladli-local-secrets.json`.
+
+## Verified
+
+- Python baseline: 27 passed, 9 disposable-Postgres tests skipped locally.
+  CI provides PostgreSQL for those integration tests.
+- Node: 20 routing/API/security/validation tests passed.
+- Deno type check passed for the two-file function entry point.
+- Live SQL checks verified private tables and reference seeds. Transactional
+  smoke tests verified shared rate limits, password compare-and-swap, session
+  revocation and atomic question replacement; fixtures rolled back.
+- Live preview `/ready` reports database connected and schema ready.
+- Browser quote submission reached Supabase (test enquiry 1).
+- PDF upload reached private storage, backend download matched all bytes,
+  and anonymous download was blocked (test enquiry 2).
+- Wrong proxy tokens, foreign origins and unauthenticated private data access
+  were rejected. The browser preview homepage and resource images load.
 
 ## Required before cutover
 
-1. Finish the free `ladli-production` project in the `ladl Org` organization.
-   Choose Asia-Pacific, disable automatic API grants and enable automatic RLS.
-   Save the database password in the owner's credential store.
-2. Recover an export of the previous database if available. The live `/ready`
-   endpoint returned 503 during preparation, and Render still referenced the
-   old internal database host. Do not assume historical enquiries or accounts
-   have been copied. Preserve the old environment settings for rollback.
-3. Apply and verify the schema on the new project. Compare table/row counts
-   after importing any recovered data; run Supabase security advisors and
-   disposable-database integration tests. Do not run destructive integration
-   tests on the client project.
-4. Provide private durable storage for PDF attachments. Supabase Storage needs
-   backend upload/download integration: the current Flask app uses S3. Moving
-   the database alone does not move attachments.
-5. Deploy a frontend preview on Cloudflare. Its default clean-URL handling must
-   preserve the site's `.html` canonicals and existing 301 redirects. Retain
-   the domain, sitemap, Search Console verification and business details.
-6. Port and test the Flask API to Supabase Edge Functions before removing
-   Render. A static upload alone does not implement forms, visitor counts,
-   sessions, CSRF, admin routes, password controls or attachment access.
-7. Verify real preview form submissions, authenticated admin access, status
-   updates, logout, CSRF rejection, unauthorized access rejection and private
-   PDF downloads. Remove preview noindex rules only from the production
-   package, then change DNS after the replacement passes.
+1. Verify the owner's real preview login, dashboard, status updates, private
+   attachment download and logout. Keep the two marked migration test
+   enquiries for verification; they are not customer requests.
+2. Compare the complete GoDaddy DNS zone with imported Cloudflare records,
+   preserving email, SPF, DKIM, DMARC and ownership verification records.
+3. Activate Cloudflare DNS using assigned nameservers
+   `arnold.ns.cloudflare.com` and `edna.ns.cloudflare.com`. Current GoDaddy
+   nameservers: `ns75.domaincontrol.com` and `ns76.domaincontrol.com`.
+   Imported web records still point to Render during activation.
+4. Connect apex and www to the tested Worker, confirm certificates, restore
+   production robots rules and remove production noindex responses. Verify
+   HTTPS, canonical redirects, sitemap and the same form/admin flows.
+5. Keep Render available as rollback until the replacement is confirmed.
 
-The website needs Cloudflare hosting as well as Supabase; Supabase does not
-run the existing Flask web service unchanged. Keep Render as the rollback
-until the complete replacement works. Use free plans only; no paid service or
-plan change is authorized. Free quotas and Supabase inactivity pausing still
-apply, so this setup is not a two-year availability guarantee.
-
-## Verification so far
-
-The latest repository checks pass with its required Flask 3.1.3 and Werkzeug
-3.1.9: 27 passed, 9 database integration tests skipped because no disposable
-database was configured. The hosted schema, data restore, storage and final
-cutover have not yet been verified.
+At this checkpoint `ladlilab.com` still points to Render; migration is not yet
+complete. No paid upgrade has been made. Free quotas and Supabase inactivity
+pausing apply; this is not a two-year availability guarantee.

@@ -5,6 +5,13 @@
 # working directory name when running `supabase init`.
 project_id = "ladli-repo"
 
+# Public web requests arrive through the Cloudflare router. The handler checks
+# its server-only proxy token and authenticates admin sessions itself.
+[functions.ladli-api]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/ladli-api/index.ts"
+
 [api]
 enabled = true
 # Port to use for the API URL.
