@@ -80,7 +80,7 @@ async function readBody(request) {
   const type = request.headers.get('content-type') || '';
   let data = {}; let attachment = null;
   try {
-    if (type.includes('application/json')) {
+    if (type.includes('application/json') && bytes.length) {
       data = JSON.parse(bytes.toString('utf8'));
       if (!data || typeof data !== 'object' || Array.isArray(data)) fail(400, 'Request body must be a JSON object.');
     } else if (type.includes('multipart/form-data') || type.includes('application/x-www-form-urlencoded')) {

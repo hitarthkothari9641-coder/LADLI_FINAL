@@ -40,6 +40,9 @@ test('preview indexing exclusions do not leak into production responses or robot
   const robots = await (await worker.fetch(new Request('https://ladlilab.com/robots.txt'), production)).text();
   assert.match(robots, /Sitemap: https:\/\/ladlilab.com\/sitemap.xml/);
   assert.doesNotMatch(robots, /^Disallow: \/$/m);
+  const preview = await worker.fetch(new Request('https://ladli-app.ladlielec.workers.dev/robots.txt'), production);
+  assert.match(preview.headers.get('X-Robots-Tag'), /noindex/);
+  assert.match(await preview.text(), /^Disallow: \/$/m);
 });
 
 test('static admin pages retain no-store and noindex protection', async () => {

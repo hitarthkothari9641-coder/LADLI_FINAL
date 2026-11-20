@@ -11,6 +11,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
+    const production = env.PREVIEW_MODE === 'false' && ['ladlilab.com', 'www.ladlilab.com'].includes(url.hostname);
     const staticFetch = async assetRequest => {
       if (env.ASSETS) return env.ASSETS.fetch(assetRequest);
       if (!env.STATIC_SITE_URL) return new Response('Static hosting is not configured.', { status: 503 });
@@ -20,10 +21,10 @@ export default {
       return fetch(target, { method: assetRequest.method, headers: forwarded, redirect: 'follow' });
     };
     const headers = new Headers(securityHeaders);
-    if (env.PREVIEW_MODE !== 'false') headers.set('X-Robots-Tag', 'noindex, nofollow');
+    if (!production) headers.set('X-Robots-Tag', 'noindex, nofollow');
     const wrap = response => {
       const result = new Response(response.body, response);
-      if (env.PREVIEW_MODE === 'false' && !path.startsWith('/admin')) result.headers.delete('X-Robots-Tag');
+      if (production && !path.startsWith('/admin')) result.headers.delete('X-Robots-Tag');
       for (const [key, value] of headers) result.headers.set(key, value);
       return result;
     };
@@ -51,7 +52,7 @@ export default {
       }
     }
     if (path === '/robots.txt') {
-      const rules = env.PREVIEW_MODE === 'false'
+      const rules = production
         ? 'User-agent: *\nDisallow: /admin/\nDisallow: /api/\nDisallow: /data/\n\nSitemap: https://ladlilab.com/sitemap.xml\n'
         : 'User-agent: *\nDisallow: /\n';
       return wrap(new Response(rules, { headers: { 'Content-Type': 'text/plain' } }));

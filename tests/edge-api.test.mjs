@@ -134,6 +134,15 @@ test('forced password change blocks enquiry access but allows CSRF and logout', 
   assert.equal(logout.status, 200); assert.match(logout.headers.get('set-cookie'), /Max-Age=0/); assert.equal(h.mutationCount(), 1);
 });
 
+test('logout accepts the browser client request with a JSON header and no body', async () => {
+  const h = authenticatedHarness();
+  const response = await h.handle(request('/api/admin/logout', 'POST', undefined,
+    { ...h.headers, 'x-csrf-token': 'test-csrf-token' }));
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('set-cookie'), /Max-Age=0/);
+  assert.equal(h.mutationCount(), 1);
+});
+
 test('public security-question recovery remains disabled', async () => {
   const handle = createHandler(config, async () => assert.fail('unexpected network request'));
   for (const path of ['get-user-questions', 'verify-security-answers', 'reset-password-with-token'])
