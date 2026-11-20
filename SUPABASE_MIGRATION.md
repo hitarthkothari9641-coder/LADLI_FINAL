@@ -92,6 +92,13 @@ the proxy secret separately, and verify that assets and bindings match the
 chosen deployment method. Never upload `.dist/ladli-local-secrets.json`.
 GitHub pushes run checks; the Cloudflare deployment is currently manual.
 
+The Dashboard code editor was observed dropping ordinary variables and
+service bindings during a code-only deployment (the encrypted secret stayed).
+Runtime values and the ASSETS service binding were restored and retested.
+Prefer deployment from the checked-in Wrangler configuration. If using the
+Dashboard editor, reapply the documented runtime configuration immediately
+and verify both the homepage and /ready after every code deployment.
+
 ## Acceptance evidence
 
 - 24 Node tests pass, covering API validation, proxy authentication, CSRF,
