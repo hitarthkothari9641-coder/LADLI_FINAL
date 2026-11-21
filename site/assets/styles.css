@@ -1,4 +1,6 @@
 :root {
+  /* Preserve the brand palette when the browser prefers a dark appearance. */
+  color-scheme: only light;
   --royal: #1F6FE5;
   --sky: #67C5F8;
   --pink: #E95AA5;
